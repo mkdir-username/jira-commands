@@ -1,17 +1,22 @@
 //! Domain-level grouping for issue lists.
 //!
-//! Maps each Jira issue to one of four buckets aligned with the team's
+//! Maps each Jira issue to one of five buckets aligned with the team's
 //! mental model:
 //!
-//! | Group | Triggers |
-//! |-------|----------|
-//! | Бизнес     | key starts with `PAYDAY-`, or type `Development` |
-//! | Техника    | key starts with `DS-` / `ZPTECH-`, or type `Dev Web Task` / `Technical task` |
-//! | Уязвимости | key starts with `SEC-`, or type starts with `Уязвим` |
-//! | Прочее     | fallthrough |
+//! | Group       | Triggers |
+//! |-------------|----------|
+//! | Бизнес      | key starts with `PAYDAY-`, or type `Development` |
+//! | Техника     | key starts with `DS-`, or type `Dev Web Task` |
+//! | Уязвимости  | key starts with `SEC-`, or type starts with `Уязвим` |
+//! | Прочее      | fallthrough |
+//! | Контейнер   | `ZPTECH-*` or type `Technical task` — quarterly aggregator label |
+//!
+//! Контейнер sits at the very end: the team-lead creates a `ZPTECH-*` ticket
+//! per quarter that just aggregates approved tech items — it is not real
+//! work itself, so we hide it behind everything actionable.
 //!
 //! Order is meaningful — `IssueCategory` derives `Ord` so `.sort()` lays
-//! groups in priority order: Бизнес → Техника → Уязвимости → Прочее.
+//! groups in priority order: Бизнес → Техника → Уязвимости → Прочее → Контейнер.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum IssueCategory {
@@ -19,6 +24,7 @@ pub(crate) enum IssueCategory {
     Tech,
     Vulnerability,
     Other,
+    Container,
 }
 
 impl IssueCategory {
@@ -28,6 +34,7 @@ impl IssueCategory {
             IssueCategory::Tech => "Техника",
             IssueCategory::Vulnerability => "Уязвимости",
             IssueCategory::Other => "Прочее",
+            IssueCategory::Container => "Контейнер (квартал)",
         }
     }
 }
@@ -35,20 +42,24 @@ impl IssueCategory {
 pub(crate) fn categorize_issue(key: &str, issue_type: &str) -> IssueCategory {
     let prefix = key.split_once('-').map(|(p, _)| p).unwrap_or("");
 
-    // Vulnerability has highest specificity — check first.
+    // Quarterly container — checked first so ZPTECH never falls into Tech.
+    if prefix == "ZPTECH" || issue_type == "Technical task" {
+        return IssueCategory::Container;
+    }
+    // Vulnerability has next-highest specificity.
     if prefix == "SEC" || issue_type.starts_with("Уязвим") {
         return IssueCategory::Vulnerability;
     }
     if prefix == "PAYDAY" {
         return IssueCategory::Business;
     }
-    if prefix == "DS" || prefix == "ZPTECH" {
+    if prefix == "DS" {
         return IssueCategory::Tech;
     }
     if issue_type == "Development" {
         return IssueCategory::Business;
     }
-    if issue_type == "Dev Web Task" || issue_type == "Technical task" {
+    if issue_type == "Dev Web Task" {
         return IssueCategory::Tech;
     }
     IssueCategory::Other
@@ -71,14 +82,22 @@ mod tests {
     }
 
     #[test]
-    fn ds_and_zptech_are_tech() {
+    fn ds_is_tech() {
         assert_eq!(
             categorize_issue("DS-16194", "Dev Web Task"),
             IssueCategory::Tech
         );
+    }
+
+    #[test]
+    fn zptech_and_technical_task_are_container() {
         assert_eq!(
             categorize_issue("ZPTECH-4080", "Technical task"),
-            IssueCategory::Tech
+            IssueCategory::Container
+        );
+        assert_eq!(
+            categorize_issue("FOO-9", "Technical task"),
+            IssueCategory::Container
         );
     }
 
@@ -112,8 +131,9 @@ mod tests {
     }
 
     #[test]
-    fn category_order_business_first_other_last() {
+    fn category_order_business_first_container_last() {
         let mut cats = vec![
+            IssueCategory::Container,
             IssueCategory::Other,
             IssueCategory::Vulnerability,
             IssueCategory::Tech,
@@ -127,6 +147,7 @@ mod tests {
                 IssueCategory::Tech,
                 IssueCategory::Vulnerability,
                 IssueCategory::Other,
+                IssueCategory::Container,
             ]
         );
     }
