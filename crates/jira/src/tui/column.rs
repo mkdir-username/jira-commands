@@ -60,9 +60,11 @@ impl ColumnKind {
     pub(super) fn width(self) -> Constraint {
         match self {
             ColumnKind::Key => Constraint::Length(12),
-            ColumnKind::Type => Constraint::Length(8),
+            // Type — fits "Development" (11), "Dev Web Task" (12), "Technical task" (14)
+            ColumnKind::Type => Constraint::Length(16),
             ColumnKind::Priority => Constraint::Length(8),
-            ColumnKind::Status => Constraint::Length(14),
+            // Status — fits "Sprint backlog" (14), "Product backlog" (15), "In Progress" (11)
+            ColumnKind::Status => Constraint::Length(18),
             ColumnKind::Assignee => Constraint::Length(16),
             ColumnKind::Reporter => Constraint::Length(16),
             ColumnKind::Project => Constraint::Length(10),

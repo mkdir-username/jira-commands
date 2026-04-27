@@ -214,6 +214,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(3)
         .block(
             Block::default()
                 .borders(Borders::ALL)
