@@ -1,6 +1,50 @@
-# CLAUDE.md — Rust Jira CLI
+# CLAUDE.md
 
-Guide for Claude (and contributors) when working in this repo.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+---
+
+## Fork context — corp-adapt branch
+
+**This checkout is `mkdir-username/jira-commands` on branch `corp-adapt`** — a fork of upstream `mulhamna/jira-commands` adapted for Alfa-Bank Jira Data Center (`jira.moscow.alfaintra.net`).
+
+Active divergences from upstream (do NOT regress when editing core code):
+
+| Commit | What | Why it matters |
+|--------|------|----------------|
+| `73c893a` | `crates/jira-core/Cargo.toml`: reqwest features `rustls-tls` → `rustls-tls-native-roots` | Embedded webpki-roots lacks corp Alfa Root CA. Native picks up macOS keychain / Linux ca-certificates store at runtime. Reverting → `invalid peer certificate: UnknownIssuer` |
+| `df160a0` | `crates/jira-core/src/client.rs::search_issues` branches by `api_version` | Cloud's `POST /rest/api/3/search/jql` does NOT exist on DC; v2 must use legacy `POST /rest/api/2/search` with `startAt` pagination. **Upstream's "Endpoint rules" table below is Cloud-only — DC code paths must stay v2-aware.** |
+| `4e4005f` | `crates/jira/src/cli/issue.rs::truncate` + inline summary cut use `chars().take()` | Slicing `&str` by byte panics on Cyrillic / CJK (`byte index N is not a char boundary`). Any new truncation must use chars, not bytes. |
+| `778572e` | `crates/jira-core/src/adf.rs::adf_to_text` passes `Value::String` through | Cloud returns rich-text fields as ADF JSON trees; DC returns plain strings (wiki markup). The renderer must handle both. CRLF normalised to LF. |
+| `50e18b6`, `155cea9` | TUI/CLI column widths + `column_spacing(3)` + minimal default `visible_columns` | Reasonable defaults for narrow terminals — power users still expand via `C` keybind. |
+| `849356b`, `496159c` | Default JQL: `resolution = Unresolved ORDER BY issuetype ASC, updated DESC` | `jirac issue list` and TUI hide finished work by default; `jirac issue view <KEY>` still fetches any issue regardless of status. |
+| `95bb3d0`, `ae98b6b`, `216aea5` | `crates/jira/src/categorize.rs` (shared module) + grouping in CLI list and TUI | See "Domain grouping" below. |
+
+**Single-purpose modules added by the fork:**
+- `crates/jira/src/categorize.rs` — `IssueCategory` enum + `categorize_issue(key, type)` used by both `cli/issue.rs::print_grouped_issues` and `tui/app.rs::set_issues`. **Both paths must call into this module — do not inline categorisation logic anywhere else.**
+
+**Sync with upstream:**
+```bash
+git fetch upstream
+git rebase upstream/main
+# resolve conflicts: prefer fork patches when they touch the rows above
+```
+
+---
+
+## Domain grouping (corp-adapt)
+
+`categorize_issue(key, type)` → 5-bucket enum. Order is the display order:
+
+| # | Category | Triggers |
+|---|----------|----------|
+| 1 | Бизнес      | key `PAYDAY-*` OR type `Development` |
+| 2 | Техника     | key `DS-*` OR type `Dev Web Task` |
+| 3 | Уязвимости  | key `SEC-*` OR type starting with `Уязвим` (Russian DC) |
+| 4 | Прочее      | fallthrough |
+| 5 | Контейнер   | key `ZPTECH-*` OR type `Technical task` (quarterly aggregator label — checked first to short-circuit Tech) |
+
+Update the categorize tests in the same module if you touch the function — `cargo test -p jira-commands categorize` runs them in isolation.
 
 ---
 
