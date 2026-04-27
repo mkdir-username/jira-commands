@@ -832,22 +832,7 @@ async fn list_issues(
     // Widths sized for full Jira issue-type/status names:
     //   Type   — fits "Development" (11), "Dev Web Task" (12), "Technical task" (14)
     //   Status — fits "Sprint backlog", "Product backlog", "In Progress"
-    println!(
-        "{:<12}  {:<16}  {:<18}  {:<40}",
-        "KEY", "TYPE", "STATUS", "SUMMARY"
-    );
-    println!("{}", "─".repeat(92));
-
-    for issue in &result.issues {
-        let summary = truncate(&issue.summary, 40);
-        println!(
-            "{:<12}  {:<16}  {:<18}  {}",
-            issue.key,
-            truncate(&issue.issue_type, 16),
-            truncate(&issue.status, 18),
-            summary
-        );
-    }
+    print_grouped_issues(&result.issues);
 
     if let Some(total) = result.total {
         println!("\nShowing {} of {} issues", result.issues.len(), total);
@@ -2822,4 +2807,174 @@ fn read_description_file(
 fn _use_old_request() {
     let _ = CreateIssueRequest::default();
     let _: Option<Value> = None;
+}
+
+// ─── grouping for `issue list` output ─────────────────────────────────────────
+//
+// Domain mapping for the team:
+//   Бизнес     — PAYDAY-* (наша команда) или type "Development"
+//   Техника    — DS-* / ZPTECH-* / type in {"Dev Web Task", "Technical task"}
+//   Уязвимости — SEC-*  /  type starts with "Уязвим"
+//   Прочее     — всё остальное
+//
+// Order in output matches priority: Бизнес → Техника → Уязвимости → Прочее.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum IssueCategory {
+    Business,
+    Tech,
+    Vulnerability,
+    Other,
+}
+
+impl IssueCategory {
+    fn label(self) -> &'static str {
+        match self {
+            IssueCategory::Business => "Бизнес",
+            IssueCategory::Tech => "Техника",
+            IssueCategory::Vulnerability => "Уязвимости",
+            IssueCategory::Other => "Прочее",
+        }
+    }
+}
+
+fn categorize_issue(key: &str, issue_type: &str) -> IssueCategory {
+    let prefix = key.split_once('-').map(|(p, _)| p).unwrap_or("");
+
+    // Vulnerability has highest specificity — check first.
+    if prefix == "SEC" || issue_type.starts_with("Уязвим") {
+        return IssueCategory::Vulnerability;
+    }
+    if prefix == "PAYDAY" {
+        return IssueCategory::Business;
+    }
+    if prefix == "DS" || prefix == "ZPTECH" {
+        return IssueCategory::Tech;
+    }
+    // Type-based fallbacks for projects not in the explicit prefix list.
+    if issue_type == "Development" {
+        return IssueCategory::Business;
+    }
+    if issue_type == "Dev Web Task" || issue_type == "Technical task" {
+        return IssueCategory::Tech;
+    }
+    IssueCategory::Other
+}
+
+fn print_grouped_issues(issues: &[jira_core::model::Issue]) {
+    use std::collections::BTreeMap;
+
+    let mut groups: BTreeMap<IssueCategory, Vec<&jira_core::model::Issue>> = BTreeMap::new();
+    for issue in issues {
+        let cat = categorize_issue(&issue.key, &issue.issue_type);
+        groups.entry(cat).or_default().push(issue);
+    }
+
+    let mut first = true;
+    for (cat, list) in &groups {
+        if list.is_empty() {
+            continue;
+        }
+        if !first {
+            println!();
+        }
+        first = false;
+
+        println!("▌ {} ({})", cat.label(), list.len());
+        println!(
+            "{:<12}  {:<16}  {:<18}  {:<40}",
+            "KEY", "TYPE", "STATUS", "SUMMARY"
+        );
+        println!("{}", "─".repeat(92));
+        for issue in list {
+            let summary = truncate(&issue.summary, 40);
+            println!(
+                "{:<12}  {:<16}  {:<18}  {}",
+                issue.key,
+                truncate(&issue.issue_type, 16),
+                truncate(&issue.status, 18),
+                summary
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod categorize_tests {
+    use super::{categorize_issue, IssueCategory};
+
+    #[test]
+    fn payday_is_business_regardless_of_type() {
+        assert_eq!(
+            categorize_issue("PAYDAY-1544", "Development"),
+            IssueCategory::Business
+        );
+        assert_eq!(
+            categorize_issue("PAYDAY-1450", "Task"),
+            IssueCategory::Business
+        );
+    }
+
+    #[test]
+    fn ds_and_zptech_are_tech() {
+        assert_eq!(
+            categorize_issue("DS-16194", "Dev Web Task"),
+            IssueCategory::Tech
+        );
+        assert_eq!(
+            categorize_issue("ZPTECH-4080", "Technical task"),
+            IssueCategory::Tech
+        );
+    }
+
+    #[test]
+    fn sec_and_uyazvim_are_vulnerability() {
+        assert_eq!(
+            categorize_issue("SEC-730258", "Уязвимость"),
+            IssueCategory::Vulnerability
+        );
+        // Even if the project isn't SEC, Russian "Уязвимость" type still wins.
+        assert_eq!(
+            categorize_issue("FOO-1", "Уязвимость средней критичности"),
+            IssueCategory::Vulnerability
+        );
+    }
+
+    #[test]
+    fn type_fallback_for_unknown_projects() {
+        assert_eq!(
+            categorize_issue("FOO-1", "Development"),
+            IssueCategory::Business
+        );
+        assert_eq!(
+            categorize_issue("BAR-2", "Dev Web Task"),
+            IssueCategory::Tech
+        );
+    }
+
+    #[test]
+    fn dbank_bug_is_other() {
+        // DBANK-365 / Bug — не PAYDAY, не DS, не SEC, тип не маппится → Other.
+        assert_eq!(categorize_issue("DBANK-365", "Bug"), IssueCategory::Other);
+    }
+
+    #[test]
+    fn category_order_business_first_other_last() {
+        let mut cats = vec![
+            IssueCategory::Other,
+            IssueCategory::Vulnerability,
+            IssueCategory::Tech,
+            IssueCategory::Business,
+        ];
+        cats.sort();
+        assert_eq!(
+            cats,
+            vec![
+                IssueCategory::Business,
+                IssueCategory::Tech,
+                IssueCategory::Vulnerability,
+                IssueCategory::Other,
+            ]
+        );
+    }
 }
