@@ -232,8 +232,14 @@ impl App {
         }
     }
 
-    pub(super) fn set_issues(&mut self, issues: Vec<Issue>) {
+    pub(super) fn set_issues(&mut self, mut issues: Vec<Issue>) {
         let prev_key = self.selected_issue_key();
+
+        // Stable sort by domain category (Бизнес → Техника → Уязвимости → Прочее).
+        // Inside a category the upstream JQL ORDER BY (issuetype + updated DESC) is preserved.
+        use crate::categorize::categorize_issue;
+        issues.sort_by_key(|i| categorize_issue(&i.key, &i.issue_type));
+
         self.issues = issues;
         if self.issues.is_empty() {
             self.table_state.select(None);

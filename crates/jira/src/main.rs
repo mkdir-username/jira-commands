@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use jira_core::{config::JiraConfig, JiraClient};
 use tracing_subscriber::{fmt, EnvFilter};
 
+mod categorize;
 mod cli;
 mod datetime;
 mod tui;
