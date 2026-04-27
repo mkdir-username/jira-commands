@@ -795,14 +795,21 @@ async fn list_issues(
     limit: u32,
     json: bool,
 ) -> Result<()> {
-    // Default ordering: group by issue type (Development/Task/SEC/...),
-    // then by recent updates. Users can still pass --jql for full control.
+    // Default filter: hide Done/Closed/Canceled (resolution != Unresolved).
+    // Default ordering: group by issue type, then by recent updates.
+    // Users get full control via --jql (no implicit filtering then).
+    // To view a finished issue use `jirac issue view <KEY>`.
     let jql_query = if let Some(jql) = jql {
         jql
     } else if let Some(proj) = &project {
-        format!("project = {proj} ORDER BY issuetype ASC, updated DESC")
+        format!(
+            "project = {proj} AND resolution = Unresolved \
+             ORDER BY issuetype ASC, updated DESC"
+        )
     } else {
-        "assignee = currentUser() ORDER BY issuetype ASC, updated DESC".to_string()
+        "assignee = currentUser() AND resolution = Unresolved \
+         ORDER BY issuetype ASC, updated DESC"
+            .to_string()
     };
 
     let spinner = spinner_new("Fetching issues...");

@@ -506,11 +506,17 @@ impl App {
 }
 
 pub async fn run_tui(client: JiraClient, project: Option<String>) -> Result<()> {
+    // Default filter: hide Done/Closed/Canceled (resolution != Unresolved).
     // Default ordering: group by issue type, then by recent updates.
     let jql = if let Some(proj) = &project {
-        format!("project = {proj} ORDER BY issuetype ASC, updated DESC")
+        format!(
+            "project = {proj} AND resolution = Unresolved \
+             ORDER BY issuetype ASC, updated DESC"
+        )
     } else {
-        "assignee = currentUser() ORDER BY issuetype ASC, updated DESC".to_string()
+        "assignee = currentUser() AND resolution = Unresolved \
+         ORDER BY issuetype ASC, updated DESC"
+            .to_string()
     };
 
     let base_url = client.base_url().to_string();
