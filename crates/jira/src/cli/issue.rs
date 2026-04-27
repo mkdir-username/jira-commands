@@ -820,19 +820,22 @@ async fn list_issues(
         return Ok(());
     }
 
+    // Widths sized for full Jira issue-type/status names:
+    //   Type   — fits "Development" (11), "Dev Web Task" (12), "Technical task" (14)
+    //   Status — fits "Sprint backlog", "Product backlog", "In Progress"
     println!(
-        "{:<12} {:<8} {:<20} {:<40}",
+        "{:<12}  {:<16}  {:<18}  {:<40}",
         "KEY", "TYPE", "STATUS", "SUMMARY"
     );
-    println!("{}", "─".repeat(82));
+    println!("{}", "─".repeat(92));
 
     for issue in &result.issues {
-        let summary = truncate(&issue.summary, 38);
+        let summary = truncate(&issue.summary, 40);
         println!(
-            "{:<12} {:<8} {:<20} {}",
+            "{:<12}  {:<16}  {:<18}  {}",
             issue.key,
-            truncate(&issue.issue_type, 7),
-            truncate(&issue.status, 19),
+            truncate(&issue.issue_type, 16),
+            truncate(&issue.status, 18),
             summary
         );
     }

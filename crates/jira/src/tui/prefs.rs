@@ -24,7 +24,14 @@ pub(super) struct TuiPreferences {
 impl Default for TuiPreferences {
     fn default() -> Self {
         Self {
-            visible_columns: AVAILABLE_COLUMNS.to_vec(),
+            // Minimal default — match Jira Assistant web UI: Key / Type / Status / Summary.
+            // Power users can extend via 'C' (columns) keybind in TUI.
+            visible_columns: vec![
+                ColumnKind::Key,
+                ColumnKind::Type,
+                ColumnKind::Status,
+                ColumnKind::Summary,
+            ],
             saved_jqls: vec![
                 SavedJql {
                     name: "My open issues".into(),
