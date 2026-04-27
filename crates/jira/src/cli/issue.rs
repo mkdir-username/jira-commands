@@ -827,11 +827,7 @@ async fn list_issues(
     println!("{}", "─".repeat(82));
 
     for issue in &result.issues {
-        let summary = if issue.summary.len() > 38 {
-            format!("{}…", &issue.summary[..37])
-        } else {
-            issue.summary.clone()
-        };
+        let summary = truncate(&issue.summary, 38);
         println!(
             "{:<12} {:<8} {:<20} {}",
             issue.key,
@@ -1598,10 +1594,12 @@ fn progress_bar(len: u64) -> ProgressBar {
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len.saturating_sub(1)])
+        let take = max_len.saturating_sub(1);
+        let prefix: String = s.chars().take(take).collect();
+        format!("{}…", prefix)
     }
 }
 
