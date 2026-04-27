@@ -285,7 +285,11 @@ impl JiraClient {
         max_results: Option<u32>,
     ) -> Result<SearchResult> {
         let headers = self.auth_headers()?;
-        let url = self.platform_url("/search/jql");
+        let url = if self.config.api_version >= 3 {
+            self.platform_url("/search/jql")
+        } else {
+            self.platform_url("/search")
+        };
 
         let mut body = json!({
             "jql": jql,
@@ -294,8 +298,14 @@ impl JiraClient {
                        "issuetype", "project", "created", "updated", "description"]
         });
 
-        if let Some(token) = next_page_token {
-            body["nextPageToken"] = json!(token);
+        if self.config.api_version >= 3 {
+            if let Some(token) = next_page_token {
+                body["nextPageToken"] = json!(token);
+            }
+        } else if let Some(token) = next_page_token {
+            if let Ok(start_at) = token.parse::<u64>() {
+                body["startAt"] = json!(start_at);
+            }
         }
 
         debug!("Searching JQL: {}", jql);
