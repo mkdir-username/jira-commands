@@ -1273,10 +1273,10 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -1569,7 +1569,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jira-commands"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "jira-core"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "anyhow",
  "comrak",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "jira-mcp"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2634,6 +2634,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -2648,7 +2649,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -4048,15 +4048,6 @@ name = "webpki-root-certs"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
 dependencies = [
  "rustls-pki-types",
 ]
