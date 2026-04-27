@@ -1,7 +1,18 @@
 use serde_json::{json, Value};
 
 /// Convert an ADF (Atlassian Document Format) JSON value to plain text.
+///
+/// Jira Cloud returns rich-text fields (description, comments) as ADF JSON trees.
+/// Jira Data Center returns the same fields as plain strings (wiki markup).
+/// Pass strings through with CRLF→LF normalisation so DC output is rendered.
 pub fn adf_to_text(value: &Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .trim_end()
+            .to_string();
+    }
     let mut output = String::new();
     render_node(value, &mut output, 0);
     output.trim_end().to_string()
@@ -494,6 +505,29 @@ fn note_unsupported(unsupported: &mut Vec<&'static str>, value: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_adf_to_text_plain_string_dc() {
+        // Jira Data Center returns `description` as a plain string (wiki markup),
+        // not as an ADF JSON tree like Cloud. The renderer must pass strings through.
+        let dc_desc = json!("MAIN_SCREEN:\r\n\r\nОж.рез:\r\nfoo");
+        let text = adf_to_text(&dc_desc);
+        assert!(
+            text.contains("MAIN_SCREEN:") && text.contains("Ож.рез:"),
+            "DC plain-string description should be passed through, got: {text:?}"
+        );
+        // CRLF should be normalised to LF for terminal output
+        assert!(
+            !text.contains("\r"),
+            "CRLF must be normalised, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_adf_to_text_empty_string() {
+        let empty = json!("");
+        assert_eq!(adf_to_text(&empty), "");
+    }
 
     #[test]
     fn test_adf_to_text_paragraph() {
