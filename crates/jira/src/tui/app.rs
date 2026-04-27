@@ -506,10 +506,11 @@ impl App {
 }
 
 pub async fn run_tui(client: JiraClient, project: Option<String>) -> Result<()> {
+    // Default ordering: group by issue type, then by recent updates.
     let jql = if let Some(proj) = &project {
-        format!("project = {proj} ORDER BY updated DESC")
+        format!("project = {proj} ORDER BY issuetype ASC, updated DESC")
     } else {
-        "assignee = currentUser() ORDER BY updated DESC".to_string()
+        "assignee = currentUser() ORDER BY issuetype ASC, updated DESC".to_string()
     };
 
     let base_url = client.base_url().to_string();

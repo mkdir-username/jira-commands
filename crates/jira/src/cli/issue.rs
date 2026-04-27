@@ -795,12 +795,14 @@ async fn list_issues(
     limit: u32,
     json: bool,
 ) -> Result<()> {
+    // Default ordering: group by issue type (Development/Task/SEC/...),
+    // then by recent updates. Users can still pass --jql for full control.
     let jql_query = if let Some(jql) = jql {
         jql
     } else if let Some(proj) = &project {
-        format!("project = {proj} ORDER BY updated DESC")
+        format!("project = {proj} ORDER BY issuetype ASC, updated DESC")
     } else {
-        "assignee = currentUser() ORDER BY updated DESC".to_string()
+        "assignee = currentUser() ORDER BY issuetype ASC, updated DESC".to_string()
     };
 
     let spinner = spinner_new("Fetching issues...");
