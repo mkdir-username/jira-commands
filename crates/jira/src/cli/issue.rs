@@ -247,6 +247,40 @@ pub enum IssueCommand {
         json: bool,
     },
 
+    /// Close an issue with proper resolution — team workflow shortcut
+    ///
+    /// Auto-detects a transition leading to a status in the "done" category
+    /// and applies it together with `resolution=Done` (default). This is the
+    /// canonical team flow: status=Closed + resolution=Done in a single call.
+    ///
+    /// Picks transitions in this priority: Closed → Done → Resolved → first
+    /// transition whose target has statusCategory.key == "done".
+    ///
+    /// For full control over fields/transition pick, use `transition` instead.
+    ///
+    /// Examples:
+    ///   jirac issue close PROJ-123                                 # status=Closed, resolution=Done
+    ///   jirac issue close PROJ-123 --resolution "Won't Do"
+    ///   jirac issue close PROJ-123 --comment "Fixed in v2.1"
+    ///   jirac issue close PROJ-123 --status Resolved               # if "Closed" not available
+    ///   jirac issue close PROJ-123 --resolution Duplicate --comment "Дубль PROJ-100"
+    Close {
+        /// Issue key (e.g. PROJ-123)
+        key: String,
+        /// Resolution name (default: Done; common: Won't Do, Duplicate, Cannot Reproduce, Incomplete)
+        #[arg(long, value_name = "NAME", default_value = "Done")]
+        resolution: Option<String>,
+        /// Add comment along with closing (Markdown supported)
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+        /// Override target status name (default: pick transition with statusCategory=done)
+        #[arg(long, value_name = "NAME")]
+        status: Option<String>,
+        /// Output transitioned issue as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Attach one or more files to an issue
     ///
     /// Uploads via multipart/form-data. MIME type is detected automatically
@@ -749,6 +783,13 @@ pub async fn handle(
             comment,
             json,
         } => transition_issue(client, key, transition, resolution, field, comment, json).await,
+        IssueCommand::Close {
+            key,
+            resolution,
+            comment,
+            status,
+            json,
+        } => close_issue(client, key, resolution, comment, status, json).await,
         IssueCommand::Attach { key, files } => attach_files(client, key, files).await,
         IssueCommand::Fields {
             project,
@@ -1434,6 +1475,162 @@ async fn transition_issue(
     } else {
         println!("✓ Transitioned: {key}");
     }
+    Ok(())
+}
+
+// ─── close ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct ChosenTransition {
+    id: String,
+    name: String,
+}
+
+/// Pick a transition that leads to a status in the "done" category.
+///
+/// Resolution order:
+/// 1. If `status_override` is provided — find by exact name (case-insensitive)
+///    among ALL transitions, error if not present.
+/// 2. Otherwise, filter to transitions with `to.statusCategory.key == "done"`.
+/// 3. Among done-candidates, prefer Closed → Done → Resolved → first.
+/// 4. If no done-category transitions exist — error with available list.
+fn pick_done_transition(
+    transitions: &[Value],
+    status_override: Option<&str>,
+) -> Result<ChosenTransition> {
+    let to_chosen = |t: &Value| ChosenTransition {
+        id: t
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        name: t
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+
+    if let Some(name) = status_override {
+        return transitions
+            .iter()
+            .find(|t| {
+                t.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| n.eq_ignore_ascii_case(name))
+                    .unwrap_or(false)
+            })
+            .map(to_chosen)
+            .ok_or_else(|| {
+                let available: Vec<&str> = transitions
+                    .iter()
+                    .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+                    .collect();
+                anyhow::anyhow!(
+                    "Transition '{}' not available. Available: {}",
+                    name,
+                    available.join(", ")
+                )
+            });
+    }
+
+    let done_candidates: Vec<&Value> = transitions
+        .iter()
+        .filter(|t| {
+            t.get("to")
+                .and_then(|to| to.get("statusCategory"))
+                .and_then(|sc| sc.get("key"))
+                .and_then(|k| k.as_str())
+                == Some("done")
+        })
+        .collect();
+
+    if done_candidates.is_empty() {
+        let available: Vec<&str> = transitions
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .collect();
+        anyhow::bail!(
+            "No transition leads to a 'done' status category. Available: {}",
+            available.join(", ")
+        );
+    }
+
+    for pref in ["Closed", "Done", "Resolved"] {
+        if let Some(t) = done_candidates.iter().find(|t| {
+            t.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.eq_ignore_ascii_case(pref))
+                .unwrap_or(false)
+        }) {
+            return Ok(to_chosen(t));
+        }
+    }
+
+    Ok(to_chosen(done_candidates[0]))
+}
+
+async fn close_issue(
+    client: JiraClient,
+    key: String,
+    resolution: Option<String>,
+    comment: Option<String>,
+    status: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let spinner = spinner_new(format!("Fetching transitions for {key}..."));
+    let transitions = client
+        .get_transitions(&key)
+        .await
+        .context("Failed to fetch transitions")?;
+    spinner.finish_and_clear();
+
+    if transitions.is_empty() {
+        anyhow::bail!("No transitions available for {key} from current status.");
+    }
+
+    let chosen = pick_done_transition(&transitions, status.as_deref())?;
+
+    let mut fields = serde_json::Map::new();
+    if let Some(r) = resolution.as_deref() {
+        fields.insert("resolution".into(), serde_json::json!({ "name": r }));
+    }
+    let fields_opt = if fields.is_empty() {
+        None
+    } else {
+        Some(&fields)
+    };
+
+    let spinner = spinner_new(format!("Closing {key} → {}...", chosen.name));
+    client
+        .transition_issue_with_fields(&key, &chosen.id, fields_opt)
+        .await
+        .context("Failed to apply closing transition")?;
+    spinner.finish_and_clear();
+
+    if let Some(text) = comment {
+        let spinner = spinner_new(format!("Adding comment to {key}..."));
+        client
+            .add_comment(&key, &text)
+            .await
+            .context("Failed to add closing comment")?;
+        spinner.finish_and_clear();
+    }
+
+    let resolution_label = resolution.as_deref().unwrap_or("none");
+    println!(
+        "✓ Closed: {key} → {} (resolution: {})",
+        chosen.name, resolution_label
+    );
+
+    if json {
+        let issue = client
+            .get_issue(&key)
+            .await
+            .context("Failed to fetch closed issue")?;
+        println!("{}", serde_json::to_string_pretty(&issue)?);
+    }
+
     Ok(())
 }
 
@@ -2996,5 +3193,96 @@ mod tests {
     fn collect_workflow_fields_empty_when_no_inputs() {
         let map = collect_workflow_fields(None, &[]).expect("should produce empty map");
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn close_parses_minimal_form() {
+        let cli = TestCli::parse_from(["close", "PAYDAY-1544"]);
+        match cli.cmd {
+            IssueCommand::Close {
+                key,
+                resolution,
+                comment,
+                status,
+                ..
+            } => {
+                assert_eq!(key, "PAYDAY-1544");
+                assert_eq!(resolution.as_deref(), Some("Done"));
+                assert!(comment.is_none());
+                assert!(status.is_none());
+            }
+            _ => panic!("expected Close variant"),
+        }
+    }
+
+    #[test]
+    fn close_parses_all_overrides() {
+        let cli = TestCli::parse_from([
+            "close",
+            "PAYDAY-1544",
+            "--resolution",
+            "Won't Do",
+            "--comment",
+            "обоснование",
+            "--status",
+            "Resolved",
+        ]);
+        match cli.cmd {
+            IssueCommand::Close {
+                resolution,
+                comment,
+                status,
+                ..
+            } => {
+                assert_eq!(resolution.as_deref(), Some("Won't Do"));
+                assert_eq!(comment.as_deref(), Some("обоснование"));
+                assert_eq!(status.as_deref(), Some("Resolved"));
+            }
+            _ => panic!("expected Close variant"),
+        }
+    }
+
+    #[test]
+    fn pick_prefers_closed_over_done() {
+        let transitions = serde_json::json!([
+            {"id": "1", "name": "Done", "to": {"statusCategory": {"key": "done"}}},
+            {"id": "2", "name": "Closed", "to": {"statusCategory": {"key": "done"}}},
+        ]);
+        let chosen =
+            pick_done_transition(transitions.as_array().unwrap(), None).expect("should pick");
+        assert_eq!(chosen.name, "Closed");
+        assert_eq!(chosen.id, "2");
+    }
+
+    #[test]
+    fn pick_explicit_status_overrides_preference() {
+        let transitions = serde_json::json!([
+            {"id": "1", "name": "Closed", "to": {"statusCategory": {"key": "done"}}},
+            {"id": "2", "name": "Won't Fix", "to": {"statusCategory": {"key": "done"}}},
+        ]);
+        let chosen = pick_done_transition(transitions.as_array().unwrap(), Some("Won't Fix"))
+            .expect("should pick");
+        assert_eq!(chosen.id, "2");
+    }
+
+    #[test]
+    fn pick_errors_when_no_done_category() {
+        let transitions = serde_json::json!([
+            {"id": "1", "name": "In Progress", "to": {"statusCategory": {"key": "indeterminate"}}},
+        ]);
+        let err =
+            pick_done_transition(transitions.as_array().unwrap(), None).expect_err("should error");
+        let msg = err.to_string();
+        assert!(msg.contains("done") || msg.contains("Done"));
+    }
+
+    #[test]
+    fn pick_explicit_status_unknown_lists_available() {
+        let transitions = serde_json::json!([
+            {"id": "1", "name": "Closed", "to": {"statusCategory": {"key": "done"}}},
+        ]);
+        let err = pick_done_transition(transitions.as_array().unwrap(), Some("Bogus"))
+            .expect_err("should error");
+        assert!(err.to_string().contains("Closed"));
     }
 }
