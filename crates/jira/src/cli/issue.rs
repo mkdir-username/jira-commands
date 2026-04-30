@@ -231,6 +231,17 @@ pub enum IssueCommand {
         key: String,
         /// Transition name (e.g. "In Progress", "Done") or numeric ID — interactive if omitted
         transition: Option<String>,
+        /// Set resolution as part of this transition (shortcut for --field resolution=NAME)
+        #[arg(long, value_name = "NAME")]
+        resolution: Option<String>,
+        /// Set arbitrary workflow field as KEY=VALUE (repeatable)
+        ///
+        /// Example: --field resolution=Done --field customfield_10000=Foo
+        #[arg(long, value_name = "KEY=VALUE")]
+        field: Vec<String>,
+        /// Add comment after successful transition (Markdown supported)
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
         /// Re-fetch and output the transitioned issue as JSON
         #[arg(long)]
         json: bool,
@@ -733,8 +744,11 @@ pub async fn handle(
         IssueCommand::Transition {
             key,
             transition,
+            resolution,
+            field,
+            comment,
             json,
-        } => transition_issue(client, key, transition, json).await,
+        } => transition_issue(client, key, transition, resolution, field, comment, json).await,
         IssueCommand::Attach { key, files } => attach_files(client, key, files).await,
         IssueCommand::Fields {
             project,
@@ -1310,10 +1324,37 @@ async fn delete_issue(client: JiraClient, key: String, force: bool) -> Result<()
 
 // ─── transition ──────────────────────────────────────────────────────────────
 
+/// Build a `fields` map from `--resolution NAME` shortcut and repeatable `--field KEY=VALUE`.
+///
+/// `KEY=VALUE` values are parsed as JSON when possible (e.g. `priority={"name":"High"}`),
+/// falling back to a plain string otherwise (e.g. `summary=Hello world`). When `resolution`
+/// is provided it is inserted as `{"name": NAME}`. Returns an empty map if neither
+/// `resolution` nor `field_pairs` produced any entry.
+fn collect_workflow_fields(
+    resolution: Option<&str>,
+    field_pairs: &[String],
+) -> Result<serde_json::Map<String, Value>> {
+    let mut map = serde_json::Map::new();
+    if let Some(r) = resolution {
+        map.insert("resolution".into(), serde_json::json!({ "name": r }));
+    }
+    for pair in field_pairs {
+        let (k, v) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--field expects KEY=VALUE, got: {pair}"))?;
+        let value: Value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string()));
+        map.insert(k.to_string(), value);
+    }
+    Ok(map)
+}
+
 async fn transition_issue(
     client: JiraClient,
     key: String,
     transition: Option<String>,
+    resolution: Option<String>,
+    field: Vec<String>,
+    comment: Option<String>,
     json: bool,
 ) -> Result<()> {
     let spinner = spinner_new(format!("Fetching transitions for {key}..."));
@@ -1361,12 +1402,28 @@ async fn transition_issue(
             .ok_or_else(|| anyhow::anyhow!("Failed to parse transition ID"))?
     };
 
+    let fields = collect_workflow_fields(resolution.as_deref(), &field)?;
+    let fields_opt = if fields.is_empty() {
+        None
+    } else {
+        Some(&fields)
+    };
+
     let spinner = spinner_new(format!("Transitioning {key}..."));
     client
-        .transition_issue(&key, &transition_id)
+        .transition_issue_with_fields(&key, &transition_id, fields_opt)
         .await
         .context("Failed to transition issue")?;
     spinner.finish_and_clear();
+
+    if let Some(text) = comment {
+        let spinner = spinner_new(format!("Adding comment to {key}..."));
+        client
+            .add_comment(&key, &text)
+            .await
+            .context("Failed to add comment after transition")?;
+        spinner.finish_and_clear();
+    }
 
     if json {
         let issue = client
@@ -2845,5 +2902,99 @@ fn print_grouped_issues(issues: &[jira_core::model::Issue]) {
                 summary
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    #[command(no_binary_name = true)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: IssueCommand,
+    }
+
+    #[test]
+    fn transition_parses_resolution_flag() {
+        let cli = TestCli::parse_from(["transition", "PAYDAY-1", "Closed", "--resolution", "Done"]);
+        match cli.cmd {
+            IssueCommand::Transition { resolution, .. } => {
+                assert_eq!(resolution.as_deref(), Some("Done"));
+            }
+            _ => panic!("expected Transition variant"),
+        }
+    }
+
+    #[test]
+    fn transition_parses_repeatable_field() {
+        let cli = TestCli::parse_from([
+            "transition",
+            "PAYDAY-1",
+            "Closed",
+            "--field",
+            "resolution=Done",
+            "--field",
+            "customfield_10000=Foo",
+        ]);
+        match cli.cmd {
+            IssueCommand::Transition { field, .. } => {
+                assert_eq!(
+                    field,
+                    vec![
+                        "resolution=Done".to_string(),
+                        "customfield_10000=Foo".to_string(),
+                    ]
+                );
+            }
+            _ => panic!("expected Transition variant"),
+        }
+    }
+
+    #[test]
+    fn transition_parses_comment() {
+        let cli = TestCli::parse_from([
+            "transition",
+            "PAYDAY-1",
+            "Closed",
+            "--comment",
+            "fixed in v2",
+        ]);
+        match cli.cmd {
+            IssueCommand::Transition { comment, .. } => {
+                assert_eq!(comment.as_deref(), Some("fixed in v2"));
+            }
+            _ => panic!("expected Transition variant"),
+        }
+    }
+
+    #[test]
+    fn collect_workflow_fields_combines_resolution_and_fields() {
+        let map = collect_workflow_fields(Some("Done"), &["customfield_10000=Foo".to_string()])
+            .expect("should parse");
+        assert_eq!(map["resolution"], serde_json::json!({"name": "Done"}));
+        assert_eq!(map["customfield_10000"], serde_json::json!("Foo"));
+    }
+
+    #[test]
+    fn collect_workflow_fields_parses_json_value() {
+        let map = collect_workflow_fields(None, &[r#"priority={"name":"High"}"#.to_string()])
+            .expect("should parse");
+        assert_eq!(map["priority"], serde_json::json!({"name": "High"}));
+    }
+
+    #[test]
+    fn collect_workflow_fields_rejects_malformed_pair() {
+        let err =
+            collect_workflow_fields(None, &["badpair".to_string()]).expect_err("should reject");
+        assert!(err.to_string().contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn collect_workflow_fields_empty_when_no_inputs() {
+        let map = collect_workflow_fields(None, &[]).expect("should produce empty map");
+        assert!(map.is_empty());
     }
 }
