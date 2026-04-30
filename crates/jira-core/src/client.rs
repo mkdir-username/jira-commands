@@ -508,13 +508,40 @@ impl JiraClient {
     }
 
     /// Transition an issue to a new status.
+    ///
+    /// Backward-compat wrapper around [`Self::transition_issue_with_fields`] that
+    /// sends only `{"transition": {"id": ...}}` without workflow fields. Status
+    /// will change but resolution stays untouched (typically `Unresolved`),
+    /// which is usually undesirable when transitioning to a `done`-category status.
+    /// Prefer [`Self::transition_issue_with_fields`] when closing an issue.
     pub async fn transition_issue(&self, key: &str, transition_id: &str) -> Result<()> {
+        self.transition_issue_with_fields(key, transition_id, None)
+            .await
+    }
+
+    /// Transition an issue, optionally setting workflow fields (e.g. `resolution`).
+    ///
+    /// Sends `{"transition": {"id": id}, "fields": {...}}` when `fields` is `Some`
+    /// and non-empty. Used to atomically apply a transition together with required
+    /// workflow fields like `resolution`. Inspect each transition's `fields` map
+    /// (returned by `GET /transitions`) to learn which fields are allowed/required.
+    pub async fn transition_issue_with_fields(
+        &self,
+        key: &str,
+        transition_id: &str,
+        fields: Option<&serde_json::Map<String, Value>>,
+    ) -> Result<()> {
         let headers = self.auth_headers()?;
         let url = self.platform_url(&format!("/issue/{key}/transitions"));
 
-        let body = json!({
+        let mut body = json!({
             "transition": { "id": transition_id }
         });
+        if let Some(f) = fields {
+            if !f.is_empty() {
+                body["fields"] = Value::Object(f.clone());
+            }
+        }
 
         let http = &self.http;
         self.request_no_body(|| http.post(&url).headers(headers.clone()).json(&body))
@@ -1300,9 +1327,23 @@ mod tests {
     use super::*;
     use crate::config::{JiraAuthType, JiraDeployment};
     use wiremock::{
-        matchers::{header, method, path},
+        matchers::{body_json, header, method, path},
         Mock, MockServer, ResponseTemplate,
     };
+
+    fn dc_test_client(base_url: String) -> JiraClient {
+        JiraClient::new(JiraConfig {
+            profile_name: Some("dc-test".into()),
+            base_url,
+            email: String::new(),
+            token: Some("dc-token".into()),
+            project: None,
+            timeout_secs: 30,
+            deployment: JiraDeployment::DataCenter,
+            auth_type: JiraAuthType::DataCenterPat,
+            api_version: 2,
+        })
+    }
 
     #[tokio::test]
     async fn data_center_pat_uses_bearer_and_api_v2() {
@@ -1458,5 +1499,55 @@ mod tests {
         assert_eq!(fields[0].name, "Labels (OSS)");
         assert!(fields[0].required);
         assert_eq!(fields[0].field_type, "array");
+    }
+
+    #[tokio::test]
+    async fn transition_with_fields_sends_resolution_in_body() {
+        let server = MockServer::start().await;
+        let expected_body = json!({
+            "transition": {"id": "321"},
+            "fields": {"resolution": {"name": "Done"}}
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/rest/api/2/issue/PAYDAY-1/transitions"))
+            .and(header("authorization", "Bearer dc-token"))
+            .and(body_json(&expected_body))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+
+        let mut fields = serde_json::Map::new();
+        fields.insert("resolution".into(), json!({"name": "Done"}));
+
+        client
+            .transition_issue_with_fields("PAYDAY-1", "321", Some(&fields))
+            .await
+            .expect("transition should succeed");
+    }
+
+    #[tokio::test]
+    async fn transition_without_fields_omits_fields_key() {
+        let server = MockServer::start().await;
+        let expected_body = json!({"transition": {"id": "321"}});
+
+        Mock::given(method("POST"))
+            .and(path("/rest/api/2/issue/PAYDAY-1/transitions"))
+            .and(header("authorization", "Bearer dc-token"))
+            .and(body_json(&expected_body))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+
+        client
+            .transition_issue("PAYDAY-1", "321")
+            .await
+            .expect("legacy transition should succeed");
     }
 }
