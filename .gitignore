@@ -36,3 +36,5 @@ TASK.md
 # Local scratch and staging
 /tmp/
 tmp/
+
+.dev/
