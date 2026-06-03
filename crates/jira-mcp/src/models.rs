@@ -34,6 +34,26 @@ pub struct IssueKeyArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IssueViewArgs {
+    pub key: String,
+    /// Авто-скачать image-вложения в локальный кэш и вернуть local_path. Default: true.
+    pub download_images: Option<bool>,
+    /// Скачать также не-image вложения. Default: false.
+    pub download_all: Option<bool>,
+    /// Каталог назначения. Default: <cache>/jira-commands/attachments/<KEY>/.
+    pub attachment_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AttachmentDownloadArgs {
+    pub key: String,
+    /// Только эти filenames/ids; пусто/None = все.
+    pub filenames: Option<Vec<String>>,
+    pub images_only: Option<bool>,
+    pub attachment_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IssueTypesListArgs {
     pub project_key: String,
 }

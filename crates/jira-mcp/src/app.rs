@@ -19,10 +19,10 @@ use url::form_urlencoded;
 use crate::{
     error::{AppError, AppResult},
     models::{
-        ApiRequestArgs, ArchiveArgs, AttachmentInput, AuthSetCredentialsArgs, BulkTransitionArgs,
-        BulkUpdateArgs, CommentAddArgs, IssueAttachArgs, IssueCreateArgs, IssueDeleteArgs,
-        IssueFieldsArgs, IssueKeyArgs, IssueListArgs, IssueTransitionArgs, IssueTypesListArgs,
-        IssueUpdateArgs, WorklogAddArgs, WorklogDeleteArgs,
+        ApiRequestArgs, ArchiveArgs, AttachmentDownloadArgs, AttachmentInput, AuthSetCredentialsArgs,
+        BulkTransitionArgs, BulkUpdateArgs, CommentAddArgs, IssueAttachArgs, IssueCreateArgs,
+        IssueDeleteArgs, IssueFieldsArgs, IssueKeyArgs, IssueListArgs, IssueTransitionArgs,
+        IssueTypesListArgs, IssueUpdateArgs, IssueViewArgs, WorklogAddArgs, WorklogDeleteArgs,
     },
 };
 
@@ -149,10 +149,51 @@ impl JiraApp {
         }))
     }
 
-    pub async fn issue_view(&self, args: IssueKeyArgs) -> AppResult<Value> {
+    pub async fn issue_view(&self, args: IssueViewArgs) -> AppResult<Value> {
+        let client = self.build_client()?;
+        let mut issue = client.get_issue(&args.key).await?;
+
+        let want_images = args.download_images.unwrap_or(true);
+        let want_all = args.download_all.unwrap_or(false);
+        if (want_images || want_all) && !issue.attachments.is_empty() {
+            let dir = match &args.attachment_dir {
+                Some(d) => PathBuf::from(d),
+                None => default_attachment_dir(&args.key)?,
+            };
+            let images_only = !want_all;
+            let saved = client
+                .download_issue_attachments(&issue.attachments, &dir, images_only)
+                .await?;
+            for att in issue.attachments.iter_mut() {
+                if let Some(s) = saved.iter().find(|s| s.filename == att.filename) {
+                    att.local_path = s.local_path.clone();
+                }
+            }
+        }
+        to_value(issue)
+    }
+
+    pub async fn attachment_download(&self, args: AttachmentDownloadArgs) -> AppResult<Value> {
         let client = self.build_client()?;
         let issue = client.get_issue(&args.key).await?;
-        to_value(issue)
+        let mut atts = issue.attachments;
+        if let Some(names) = &args.filenames {
+            if !names.is_empty() {
+                atts.retain(|a| names.contains(&a.filename) || names.contains(&a.id));
+            }
+        }
+        let dir = match &args.attachment_dir {
+            Some(d) => PathBuf::from(d),
+            None => default_attachment_dir(&args.key)?,
+        };
+        let saved = client
+            .download_issue_attachments(&atts, &dir, args.images_only.unwrap_or(false))
+            .await?;
+        Ok(json!({
+            "key": args.key,
+            "dir": dir.to_string_lossy(),
+            "downloaded": saved
+        }))
     }
 
     pub async fn issue_types_list(&self, args: IssueTypesListArgs) -> AppResult<Value> {
@@ -643,6 +684,11 @@ where
     serde_json::to_value(value).map_err(Into::into)
 }
 
+fn default_attachment_dir(key: &str) -> AppResult<PathBuf> {
+    let base = dirs::cache_dir().ok_or_else(|| AppError::internal("no cache dir available"))?;
+    Ok(base.join("jira-commands").join("attachments").join(key))
+}
+
 fn value_or_null(value: String) -> Value {
     if value.trim().is_empty() {
         Value::Null
@@ -719,6 +765,94 @@ mod tests {
                 "attachment": []
             }
         })
+    }
+
+    fn image_issue_json(mock_uri: &str) -> Value {
+        json!({
+            "id": "1",
+            "key": "TEST-1",
+            "fields": {
+                "summary": "s",
+                "description": null,
+                "status": { "name": "Open" },
+                "issuetype": { "name": "Bug" },
+                "project": { "key": "TEST" },
+                "created": "2026-01-01T00:00:00.000+0000",
+                "updated": "2026-01-01T00:00:00.000+0000",
+                "attachment": [{
+                    "id": "9",
+                    "filename": "a.png",
+                    "size": 4,
+                    "mimeType": "image/png",
+                    "content": format!("{mock_uri}/secure/attachment/9/a.png"),
+                    "created": "2026-01-01T00:00:00.000+0000"
+                }]
+            }
+        })
+    }
+
+    async fn mount_image_issue(mock: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/TEST-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(image_issue_json(&mock.uri())))
+            .mount(mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/secure/attachment/9/a.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DATA".to_vec()))
+            .mount(mock)
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn issue_view_downloads_images_by_default() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let mock = MockServer::start().await;
+        set_test_env(&temp_dir, Some(&mock.uri()));
+        mount_image_issue(&mock).await;
+
+        let dir = TempDir::new().expect("dl dir");
+        let result = JiraApp
+            .issue_view(IssueViewArgs {
+                key: "TEST-1".into(),
+                download_images: None,
+                download_all: None,
+                attachment_dir: Some(dir.path().to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("view");
+
+        let lp = result["attachments"][0]["local_path"]
+            .as_str()
+            .expect("local_path present");
+        assert!(std::path::Path::new(lp).exists());
+        clear_test_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn attachment_download_saves_selected() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let mock = MockServer::start().await;
+        set_test_env(&temp_dir, Some(&mock.uri()));
+        mount_image_issue(&mock).await;
+
+        let dir = TempDir::new().expect("dl dir");
+        let result = JiraApp
+            .attachment_download(AttachmentDownloadArgs {
+                key: "TEST-1".into(),
+                filenames: None,
+                images_only: Some(true),
+                attachment_dir: Some(dir.path().to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("download");
+
+        let saved = result["downloaded"].as_array().expect("array");
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0]["local_path"].as_str().is_some());
+        clear_test_env();
     }
 
     #[tokio::test]

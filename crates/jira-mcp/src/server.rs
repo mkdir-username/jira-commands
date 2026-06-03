@@ -17,10 +17,11 @@ use crate::{
     app::JiraApp,
     error::AppResult,
     models::{
-        ApiRequestArgs, ArchiveArgs, AuthSetCredentialsArgs, BulkTransitionArgs, BulkUpdateArgs,
-        CommentAddArgs, IssueAttachArgs, IssueCreateArgs, IssueDeleteArgs, IssueFieldsArgs,
-        IssueKeyArgs, IssueListArgs, IssueTransitionArgs, IssueTypesListArgs, IssueUpdateArgs,
-        ToolResponse, WorklogAddArgs, WorklogDeleteArgs,
+        ApiRequestArgs, ArchiveArgs, AttachmentDownloadArgs, AuthSetCredentialsArgs,
+        BulkTransitionArgs, BulkUpdateArgs, CommentAddArgs, IssueAttachArgs, IssueCreateArgs,
+        IssueDeleteArgs, IssueFieldsArgs, IssueKeyArgs, IssueListArgs, IssueTransitionArgs,
+        IssueTypesListArgs, IssueUpdateArgs, IssueViewArgs, ToolResponse, WorklogAddArgs,
+        WorklogDeleteArgs,
     },
 };
 
@@ -108,13 +109,24 @@ impl JiraMcpServer {
 
     #[tool(
         name = "jira_issue_view",
-        description = "Fetch full details for a Jira issue"
+        description = "Fetch full details for a Jira issue. By default auto-downloads image attachments to a local cache and returns local_path per attachment (set download_images=false to disable)."
     )]
     pub async fn jira_issue_view(
         &self,
-        Parameters(args): Parameters<IssueKeyArgs>,
+        Parameters(args): Parameters<IssueViewArgs>,
     ) -> Result<Json<ToolResponse>, ErrorData> {
         self.respond(self.app.issue_view(args).await)
+    }
+
+    #[tool(
+        name = "jira_attachment_download",
+        description = "Download a Jira issue's attachments to local disk; returns local_path per file. Use images_only=true to skip non-images, or filenames to select specific attachments."
+    )]
+    pub async fn jira_attachment_download(
+        &self,
+        Parameters(args): Parameters<AttachmentDownloadArgs>,
+    ) -> Result<Json<ToolResponse>, ErrorData> {
+        self.respond(self.app.attachment_download(args).await)
     }
 
     #[tool(
