@@ -241,6 +241,56 @@ impl JiraClient {
         }
     }
 
+    /// Core request для бинарных ответов (attachment download) с rate-limit retry.
+    async fn request_bytes(
+        &self,
+        builder_fn: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<Vec<u8>> {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let response = builder_fn().send().await?;
+
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = response
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(60);
+
+                warn!("Rate limited. Retrying after {}s", retry_after);
+
+                if attempt >= MAX_RETRIES {
+                    return Err(JiraError::RateLimit { retry_after });
+                }
+
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                continue;
+            }
+
+            let status = response.status();
+            if status == StatusCode::NOT_FOUND {
+                return Err(JiraError::NotFound(response.text().await.unwrap_or_default()));
+            }
+            if !status.is_success() {
+                return Err(JiraError::Api {
+                    status: status.as_u16(),
+                    message: response.text().await.unwrap_or_default(),
+                });
+            }
+            return Ok(response.bytes().await?.to_vec());
+        }
+    }
+
+    /// Скачать произвольный авторизованный URL (полный absolute, напр. attachment.content).
+    pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let headers = self.auth_headers_no_content_type()?;
+        let http = &self.http;
+        self.request_bytes(|| http.get(url).headers(headers.clone()))
+            .await
+    }
+
     /// Multipart request with rate-limit retry (for attachment uploads).
     async fn request_multipart<T>(
         &self,
@@ -1343,6 +1393,21 @@ mod tests {
             auth_type: JiraAuthType::DataCenterPat,
             api_version: 2,
         })
+    }
+
+    #[tokio::test]
+    async fn request_bytes_returns_raw_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1u8, 2, 3]))
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+        let url = format!("{}/blob", server.uri());
+        let bytes = client.fetch_bytes(&url).await.unwrap();
+        assert_eq!(bytes, vec![1u8, 2, 3]);
     }
 
     #[tokio::test]
