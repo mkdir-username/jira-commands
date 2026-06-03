@@ -291,6 +291,52 @@ impl JiraClient {
             .await
     }
 
+    /// Скачать содержимое одного вложения по его `content` URL.
+    pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
+        if attachment.content.is_empty() {
+            return Err(JiraError::NotFound(format!(
+                "attachment {} has no content URL",
+                attachment.id
+            )));
+        }
+        self.fetch_bytes(&attachment.content).await
+    }
+
+    /// Скачать вложения задачи в каталог. Возвращает копии Attachment c заполненным local_path.
+    /// images_only=true пропускает не-image mime. Идемпотентно: пропускает существующие файлы
+    /// совпадающего размера.
+    pub async fn download_issue_attachments(
+        &self,
+        attachments: &[Attachment],
+        dir: &std::path::Path,
+        images_only: bool,
+    ) -> Result<Vec<Attachment>> {
+        std::fs::create_dir_all(dir)?;
+        let mut out = Vec::new();
+        for att in attachments {
+            if images_only && !att.is_image() {
+                continue;
+            }
+            // sanitize: имя из API недоверенное — берём только базовое имя (защита от path traversal `../`, `/`)
+            let safe_name = std::path::Path::new(&att.filename)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("attachment-{}", att.id));
+            let target = dir.join(&safe_name);
+            let up_to_date = std::fs::metadata(&target)
+                .map(|m| att.size != 0 && m.len() == att.size)
+                .unwrap_or(false);
+            if !up_to_date {
+                let bytes = self.download_attachment(att).await?;
+                std::fs::write(&target, &bytes)?;
+            }
+            let mut copy = att.clone();
+            copy.local_path = Some(target.to_string_lossy().into_owned());
+            out.push(copy);
+        }
+        Ok(out)
+    }
+
     /// Multipart request with rate-limit retry (for attachment uploads).
     async fn request_multipart<T>(
         &self,
@@ -1408,6 +1454,63 @@ mod tests {
         let url = format!("{}/blob", server.uri());
         let bytes = client.fetch_bytes(&url).await.unwrap();
         assert_eq!(bytes, vec![1u8, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn download_attachment_fetches_content_url() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secure/attachment/42/img.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"PNGDATA".to_vec()))
+            .mount(&server)
+            .await;
+
+        let att = Attachment {
+            id: "42".into(),
+            filename: "img.png".into(),
+            size: 7,
+            mime_type: "image/png".into(),
+            content: format!("{}/secure/attachment/42/img.png", server.uri()),
+            created: String::new(),
+            author: None,
+            local_path: None,
+        };
+        let client = dc_test_client(server.uri());
+        let bytes = client.download_attachment(&att).await.unwrap();
+        assert_eq!(bytes, b"PNGDATA");
+    }
+
+    #[tokio::test]
+    async fn download_issue_attachments_saves_images_to_dir() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secure/attachment/1/a.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DATA".to_vec()))
+            .mount(&server)
+            .await;
+
+        let mk = |id: &str, name: &str, mime: &str| Attachment {
+            id: id.into(),
+            filename: name.into(),
+            size: 4,
+            mime_type: mime.into(),
+            content: format!("{}/secure/attachment/{id}/{name}", server.uri()),
+            created: String::new(),
+            author: None,
+            local_path: None,
+        };
+        let atts = vec![mk("1", "a.png", "image/png"), mk("2", "b.pdf", "application/pdf")];
+        let dir = tempfile::tempdir().unwrap();
+        let client = dc_test_client(server.uri());
+
+        let saved = client
+            .download_issue_attachments(&atts, dir.path(), true)
+            .await
+            .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].local_path.as_ref().unwrap().ends_with("a.png"));
+        assert!(dir.path().join("a.png").exists());
+        assert!(!dir.path().join("b.pdf").exists());
     }
 
     #[tokio::test]
