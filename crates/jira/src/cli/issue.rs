@@ -66,6 +66,15 @@ pub enum IssueCommand {
         /// Каталог для скачивания (default: ./<KEY>-attachments)
         #[arg(long, value_name = "DIR")]
         download_dir: Option<std::path::PathBuf>,
+        /// Не сжимать картинки (по умолчанию downscale + JPEG)
+        #[arg(long)]
+        no_compress: bool,
+        /// Макс. ширина при сжатии (default: 1280)
+        #[arg(long, value_name = "PX")]
+        max_width: Option<u32>,
+        /// Качество JPEG 1..=100 при сжатии (default: 75)
+        #[arg(long, value_name = "Q")]
+        quality: Option<u8>,
     },
 
     /// Create a new issue — interactive or fully non-interactive
@@ -718,7 +727,23 @@ pub async fn handle(
             download,
             download_all,
             download_dir,
-        } => view_issue(client, key, json, download, download_all, download_dir).await,
+            no_compress,
+            max_width,
+            quality,
+        } => {
+            view_issue(
+                client,
+                key,
+                json,
+                download,
+                download_all,
+                download_dir,
+                no_compress,
+                max_width,
+                quality,
+            )
+            .await
+        }
         IssueCommand::Create {
             project,
             summary,
@@ -913,6 +938,7 @@ async fn list_issues(
 
 // ─── view ────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn view_issue(
     client: JiraClient,
     key: String,
@@ -920,6 +946,9 @@ async fn view_issue(
     download: bool,
     download_all: bool,
     download_dir: Option<std::path::PathBuf>,
+    no_compress: bool,
+    max_width: Option<u32>,
+    quality: Option<u8>,
 ) -> Result<()> {
     let spinner = spinner_new(format!("Fetching {key}..."));
     let issue = client
@@ -968,8 +997,14 @@ async fn view_issue(
 
     if download || download_all {
         let dir = download_dir.unwrap_or_else(|| std::path::PathBuf::from(format!("{key}-attachments")));
+        let opts = jira_core::DownloadOptions {
+            images_only: !download_all,
+            compress: !no_compress,
+            max_width: max_width.unwrap_or(1280),
+            quality: quality.unwrap_or(75),
+        };
         let saved = client
-            .download_issue_attachments(&issue.attachments, &dir, !download_all)
+            .download_issue_attachments(&issue.attachments, &dir, &opts)
             .await
             .context("Failed to download attachments")?;
         println!();

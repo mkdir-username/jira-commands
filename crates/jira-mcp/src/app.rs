@@ -10,7 +10,7 @@ use jira_core::{
         field::{Field, FieldValue},
         CreateIssueRequestV2, UpdateIssueRequest,
     },
-    JiraClient,
+    DownloadOptions, JiraClient,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -160,9 +160,14 @@ impl JiraApp {
                 Some(d) => PathBuf::from(d),
                 None => default_attachment_dir(&args.key)?,
             };
-            let images_only = !want_all;
+            let opts = DownloadOptions {
+                images_only: !want_all,
+                compress: args.compress.unwrap_or(true),
+                max_width: args.max_width.unwrap_or(1280),
+                quality: args.quality.unwrap_or(75),
+            };
             let saved = client
-                .download_issue_attachments(&issue.attachments, &dir, images_only)
+                .download_issue_attachments(&issue.attachments, &dir, &opts)
                 .await?;
             for att in issue.attachments.iter_mut() {
                 if let Some(s) = saved.iter().find(|s| s.filename == att.filename) {
@@ -186,8 +191,14 @@ impl JiraApp {
             Some(d) => PathBuf::from(d),
             None => default_attachment_dir(&args.key)?,
         };
+        let opts = DownloadOptions {
+            images_only: args.images_only.unwrap_or(false),
+            compress: args.compress.unwrap_or(true),
+            max_width: args.max_width.unwrap_or(1280),
+            quality: args.quality.unwrap_or(75),
+        };
         let saved = client
-            .download_issue_attachments(&atts, &dir, args.images_only.unwrap_or(false))
+            .download_issue_attachments(&atts, &dir, &opts)
             .await?;
         Ok(json!({
             "key": args.key,
@@ -819,6 +830,9 @@ mod tests {
                 download_images: None,
                 download_all: None,
                 attachment_dir: Some(dir.path().to_string_lossy().into_owned()),
+                compress: Some(false),
+                max_width: None,
+                quality: None,
             })
             .await
             .expect("view");
@@ -845,6 +859,9 @@ mod tests {
                 filenames: None,
                 images_only: Some(true),
                 attachment_dir: Some(dir.path().to_string_lossy().into_owned()),
+                compress: Some(false),
+                max_width: None,
+                quality: None,
             })
             .await
             .expect("download");

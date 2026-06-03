@@ -42,6 +42,12 @@ pub struct IssueViewArgs {
     pub download_all: Option<bool>,
     /// Каталог назначения. Default: <cache>/jira-commands/attachments/<KEY>/.
     pub attachment_dir: Option<String>,
+    /// Сжимать картинки (downscale + JPEG). Default: true.
+    pub compress: Option<bool>,
+    /// Макс. ширина при сжатии. Default: 1280.
+    pub max_width: Option<u32>,
+    /// Качество JPEG 1..=100 при сжатии. Default: 75.
+    pub quality: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -51,6 +57,12 @@ pub struct AttachmentDownloadArgs {
     pub filenames: Option<Vec<String>>,
     pub images_only: Option<bool>,
     pub attachment_dir: Option<String>,
+    /// Сжимать картинки (downscale + JPEG). Default: true.
+    pub compress: Option<bool>,
+    /// Макс. ширина при сжатии. Default: 1280.
+    pub max_width: Option<u32>,
+    /// Качество JPEG 1..=100 при сжатии. Default: 75.
+    pub quality: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

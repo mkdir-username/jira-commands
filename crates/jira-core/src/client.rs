@@ -32,6 +32,57 @@ pub struct JiraClient {
     config: JiraConfig,
 }
 
+/// Параметры скачивания вложений задачи.
+#[derive(Debug, Clone)]
+pub struct DownloadOptions {
+    /// Пропускать не-image вложения.
+    pub images_only: bool,
+    /// Даунскейл + JPEG-перекодирование картинок (retina-PNG неуместен для тех-контекста).
+    pub compress: bool,
+    /// Максимальная ширина при compress (картинки уже неё не апскейлятся).
+    pub max_width: u32,
+    /// Качество JPEG (1..=100) при compress.
+    pub quality: u8,
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            images_only: false,
+            compress: true,
+            max_width: 1280,
+            quality: 75,
+        }
+    }
+}
+
+/// Пере-кодировать картинку в JPEG, ЕСЛИ это оправдано и реально уменьшает размер.
+/// Сжимаем только когда: шире max_width (нужен downscale) ИЛИ это PNG (lossless retina-скрин —
+/// главный источник bloat'а). Уже-маленький JPEG ≤max_width оставляем как есть.
+/// `Some(jpeg)` только если результат строго меньше оригинала (do-no-harm); иначе `None`.
+fn maybe_compress(bytes: &[u8], max_width: u32, quality: u8) -> Option<Vec<u8>> {
+    let format = image::guess_format(bytes).ok()?;
+    let img = image::load_from_memory(bytes).ok()?;
+
+    let too_wide = img.width() > max_width;
+    let is_png = format == image::ImageFormat::Png;
+    if !too_wide && !is_png {
+        return None; // already-JPEG разумного размера — не трогаем
+    }
+
+    let img = if too_wide {
+        img.resize(max_width, u32::MAX, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+        .encode_image(&img.to_rgb8())
+        .ok()?;
+
+    (out.len() < bytes.len()).then_some(out)
+}
+
 impl JiraClient {
     pub fn new(config: JiraConfig) -> Self {
         let http = Client::builder()
@@ -303,18 +354,19 @@ impl JiraClient {
     }
 
     /// Скачать вложения задачи в каталог. Возвращает копии Attachment c заполненным local_path.
-    /// images_only=true пропускает не-image mime. Идемпотентно: пропускает существующие файлы
-    /// совпадающего размера.
+    /// opts.images_only=true пропускает не-image mime. При opts.compress картинки даунскейлятся
+    /// до opts.max_width и пере-кодируются в JPEG (имя → `.jpg`) — retina-PNG неуместен для
+    /// технического контекста. Идемпотентно: raw — по совпадению размера, сжатые — по наличию файла.
     pub async fn download_issue_attachments(
         &self,
         attachments: &[Attachment],
         dir: &std::path::Path,
-        images_only: bool,
+        opts: &DownloadOptions,
     ) -> Result<Vec<Attachment>> {
         std::fs::create_dir_all(dir)?;
         let mut out = Vec::new();
         for att in attachments {
-            if images_only && !att.is_image() {
+            if opts.images_only && !att.is_image() {
                 continue;
             }
             // sanitize: имя из API недоверенное — берём только базовое имя (защита от path traversal `../`, `/`)
@@ -322,16 +374,41 @@ impl JiraClient {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| format!("attachment-{}", att.id));
-            let target = dir.join(&safe_name);
-            let up_to_date = std::fs::metadata(&target)
-                .map(|m| att.size != 0 && m.len() == att.size)
-                .unwrap_or(false);
-            if !up_to_date {
+
+            let want_compress = opts.compress && att.is_image();
+            let stem = std::path::Path::new(&safe_name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| safe_name.clone());
+            let raw_target = dir.join(&safe_name);
+            let jpg_target = dir.join(format!("{stem}.jpg"));
+
+            // идемпотентность: файл (в любой из двух форм) уже на месте
+            let existing = if want_compress && jpg_target.exists() {
+                Some(jpg_target.clone())
+            } else if raw_target.exists() {
+                Some(raw_target.clone())
+            } else {
+                None
+            };
+
+            let final_path = if let Some(p) = existing {
+                p
+            } else {
                 let bytes = self.download_attachment(att).await?;
-                std::fs::write(&target, &bytes)?;
-            }
+                let (out_bytes, target) = match want_compress
+                    .then(|| maybe_compress(&bytes, opts.max_width, opts.quality))
+                    .flatten()
+                {
+                    Some(jpg) => (jpg, jpg_target),
+                    None => (bytes, raw_target),
+                };
+                std::fs::write(&target, &out_bytes)?;
+                target
+            };
+
             let mut copy = att.clone();
-            copy.local_path = Some(target.to_string_lossy().into_owned());
+            copy.local_path = Some(final_path.to_string_lossy().into_owned());
             out.push(copy);
         }
         Ok(out)
@@ -1503,14 +1580,62 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = dc_test_client(server.uri());
 
+        // compress=false → проверяем чистую filter+to-dir логику без перекодирования
+        let opts = DownloadOptions {
+            images_only: true,
+            compress: false,
+            ..DownloadOptions::default()
+        };
         let saved = client
-            .download_issue_attachments(&atts, dir.path(), true)
+            .download_issue_attachments(&atts, dir.path(), &opts)
             .await
             .unwrap();
         assert_eq!(saved.len(), 1);
         assert!(saved[0].local_path.as_ref().unwrap().ends_with("a.png"));
         assert!(dir.path().join("a.png").exists());
         assert!(!dir.path().join("b.pdf").exists());
+    }
+
+    fn sample_png(w: u32, h: u32) -> Vec<u8> {
+        let buf = image::RgbImage::from_fn(w, h, |x, _| image::Rgb([(x % 256) as u8, 0, 0]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(buf)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    fn sample_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let buf = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
+            .encode_image(&buf)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn maybe_compress_downscales_wide_png_to_jpeg() {
+        let png = sample_png(3000, 100);
+        let jpg = maybe_compress(&png, 1280, 75).expect("compressed");
+        let decoded = image::load_from_memory(&jpg).expect("decode jpg");
+        assert!(decoded.width() <= 1280, "width {} > 1280", decoded.width());
+        assert_eq!(image::guess_format(&jpg).unwrap(), image::ImageFormat::Jpeg);
+        assert!(jpg.len() < png.len(), "jpg {} !< png {}", jpg.len(), png.len());
+    }
+
+    #[test]
+    fn maybe_compress_skips_small_jpeg() {
+        // уже-JPEG в пределах max_width — не трогаем (иначе бы раздули)
+        let jpg = sample_jpeg(400, 300);
+        assert!(maybe_compress(&jpg, 1280, 75).is_none());
+    }
+
+    #[test]
+    fn maybe_compress_returns_none_on_garbage() {
+        assert!(maybe_compress(b"not-an-image", 1280, 75).is_none());
     }
 
     #[tokio::test]
