@@ -57,6 +57,15 @@ pub enum IssueCommand {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Скачать image-вложения локально и вывести пути
+        #[arg(long)]
+        download: bool,
+        /// Скачать ВСЕ вложения (не только картинки)
+        #[arg(long)]
+        download_all: bool,
+        /// Каталог для скачивания (default: ./<KEY>-attachments)
+        #[arg(long, value_name = "DIR")]
+        download_dir: Option<std::path::PathBuf>,
     },
 
     /// Create a new issue — interactive or fully non-interactive
@@ -703,7 +712,13 @@ pub async fn handle(
             limit,
             json,
         } => list_issues(client, project.or(default_project), jql, limit, json).await,
-        IssueCommand::View { key, json } => view_issue(client, key, json).await,
+        IssueCommand::View {
+            key,
+            json,
+            download,
+            download_all,
+            download_dir,
+        } => view_issue(client, key, json, download, download_all, download_dir).await,
         IssueCommand::Create {
             project,
             summary,
@@ -898,7 +913,14 @@ async fn list_issues(
 
 // ─── view ────────────────────────────────────────────────────────────────────
 
-async fn view_issue(client: JiraClient, key: String, json: bool) -> Result<()> {
+async fn view_issue(
+    client: JiraClient,
+    key: String,
+    json: bool,
+    download: bool,
+    download_all: bool,
+    download_dir: Option<std::path::PathBuf>,
+) -> Result<()> {
     let spinner = spinner_new(format!("Fetching {key}..."));
     let issue = client
         .get_issue(&key)
@@ -941,6 +963,21 @@ async fn view_issue(client: JiraClient, key: String, json: bool) -> Result<()> {
         println!("  Attachments ({}):", issue.attachments.len());
         for a in &issue.attachments {
             println!("    • {} ({}, {} bytes)", a.filename, a.mime_type, a.size);
+        }
+    }
+
+    if download || download_all {
+        let dir = download_dir.unwrap_or_else(|| std::path::PathBuf::from(format!("{key}-attachments")));
+        let saved = client
+            .download_issue_attachments(&issue.attachments, &dir, !download_all)
+            .await
+            .context("Failed to download attachments")?;
+        println!();
+        println!("  Downloaded ({}):", saved.len());
+        for a in &saved {
+            if let Some(p) = &a.local_path {
+                println!("    ✓ {p}");
+            }
         }
     }
 
