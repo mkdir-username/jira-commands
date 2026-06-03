@@ -48,7 +48,7 @@ The MCP server includes tools for:
 - auth status and credential updates
 - issue list, view, create, update, delete, and clone
 - field and transition discovery
-- attachment upload
+- attachment upload and download
 - worklog operations
 - bulk transition, bulk update, batch, and archive flows
 - plans
@@ -59,6 +59,9 @@ The MCP server includes tools for:
 - Current focus is tools, not prompts/resources/UI.
 - Destructive operations require `confirm: true`.
 - Attachment uploads support local file paths or inline base64 payloads.
+- `jira_issue_view` **auto-downloads image attachments by default** to a local cache (`<cache>/jira-commands/attachments/<KEY>/`) and returns `local_path` per attachment, so agents get the visual context without an extra step. Disable with `download_images: false`.
+- Downloaded images are **compressed by default** (downscale to `max_width` 1280 + PNG→JPEG, quality 75) — full-res retina PNGs are inappropriate for a technical task. Compression is do-no-harm: already-small JPEGs are kept untouched. Disable with `compress: false`; tune via `max_width` / `quality`.
+- `jira_attachment_download` downloads selected/all attachments on demand with the same options.
 
 ## More docs
 

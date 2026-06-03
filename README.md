@@ -98,6 +98,9 @@ jirac issue list -p PROJ                            # by project
 jirac issue list --jql "status = 'In Progress'"     # custom JQL
 
 jirac issue view PROJ-123                           # view detail
+jirac issue view PROJ-123 --download                # + скачать картинки (downscale + JPEG)
+jirac issue view PROJ-123 --download --no-compress  # скачать в оригинале
+jirac issue view PROJ-123 --download-all --download-dir ./att  # все вложения в каталог
 jirac issue create -p PROJ                          # create (interactive)
 jirac issue create -p PROJ --type Bug --summary "Login fails on Safari"
 jirac issue render --input desc.md                  # preview Markdown -> ADF JSON

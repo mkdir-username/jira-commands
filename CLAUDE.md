@@ -67,7 +67,7 @@ Claude may:
 
 ## Project overview
 
-Rust CLI for Atlassian Jira (`jirac` binary). Focus: full custom field via dynamic introspection, attachment upload, Jira REST API v3, interactive TUI (ratatui), single binary.
+Rust CLI for Atlassian Jira (`jirac` binary). Focus: full custom field via dynamic introspection, attachment upload/download (image auto-download + compression for agent context), Jira REST API v3, interactive TUI (ratatui), single binary.
 
 ### Workspace structure
 
