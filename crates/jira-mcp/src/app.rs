@@ -19,10 +19,11 @@ use url::form_urlencoded;
 use crate::{
     error::{AppError, AppResult},
     models::{
-        ApiRequestArgs, ArchiveArgs, AttachmentDownloadArgs, AttachmentInput, AuthSetCredentialsArgs,
-        BulkTransitionArgs, BulkUpdateArgs, CommentAddArgs, IssueAttachArgs, IssueCreateArgs,
-        IssueDeleteArgs, IssueFieldsArgs, IssueKeyArgs, IssueListArgs, IssueTransitionArgs,
-        IssueTypesListArgs, IssueUpdateArgs, IssueViewArgs, WorklogAddArgs, WorklogDeleteArgs,
+        ApiRequestArgs, ArchiveArgs, AttachmentDownloadArgs, AttachmentInput,
+        AuthSetCredentialsArgs, BulkTransitionArgs, BulkUpdateArgs, CommentAddArgs,
+        IssueAttachArgs, IssueCreateArgs, IssueDeleteArgs, IssueFieldsArgs, IssueKeyArgs,
+        IssueListArgs, IssueTransitionArgs, IssueTypesListArgs, IssueUpdateArgs, IssueViewArgs,
+        WorklogAddArgs, WorklogDeleteArgs,
     },
 };
 
@@ -261,6 +262,7 @@ impl JiraApp {
                 parent: args.parent,
                 fix_versions: args.fix_versions.unwrap_or_default(),
                 custom_fields: map_custom_fields(args.custom_fields),
+                update_ops: serde_json::Map::new(),
             })
             .await?;
 

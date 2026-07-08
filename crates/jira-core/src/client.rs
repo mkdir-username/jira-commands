@@ -322,7 +322,9 @@ impl JiraClient {
 
             let status = response.status();
             if status == StatusCode::NOT_FOUND {
-                return Err(JiraError::NotFound(response.text().await.unwrap_or_default()));
+                return Err(JiraError::NotFound(
+                    response.text().await.unwrap_or_default(),
+                ));
             }
             if !status.is_success() {
                 return Err(JiraError::Api {
@@ -1012,7 +1014,10 @@ impl JiraClient {
             fields[field_id] = value.to_api_json();
         }
 
-        let body = json!({ "fields": fields });
+        let mut body = json!({ "fields": fields });
+        if !req.update_ops.is_empty() {
+            body["update"] = Value::Object(req.update_ops.clone());
+        }
 
         #[derive(serde::Deserialize)]
         struct CreateResponse {
@@ -1576,7 +1581,10 @@ mod tests {
             author: None,
             local_path: None,
         };
-        let atts = vec![mk("1", "a.png", "image/png"), mk("2", "b.pdf", "application/pdf")];
+        let atts = vec![
+            mk("1", "a.png", "image/png"),
+            mk("2", "b.pdf", "application/pdf"),
+        ];
         let dir = tempfile::tempdir().unwrap();
         let client = dc_test_client(server.uri());
 
@@ -1623,7 +1631,12 @@ mod tests {
         let decoded = image::load_from_memory(&jpg).expect("decode jpg");
         assert!(decoded.width() <= 1280, "width {} > 1280", decoded.width());
         assert_eq!(image::guess_format(&jpg).unwrap(), image::ImageFormat::Jpeg);
-        assert!(jpg.len() < png.len(), "jpg {} !< png {}", jpg.len(), png.len());
+        assert!(
+            jpg.len() < png.len(),
+            "jpg {} !< png {}",
+            jpg.len(),
+            png.len()
+        );
     }
 
     #[test]

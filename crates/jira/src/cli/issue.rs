@@ -150,6 +150,14 @@ pub enum IssueCommand {
         /// Run `jirac issue fields -p PROJ --issue-type Bug` to list all field IDs.
         #[arg(long, value_name = "FIELD_ID=VALUE")]
         field: Vec<String>,
+        /// Set a field via an `update` operation instead of `fields` — repeatable.
+        /// Required for plugin field types (e.g. ECCF single-select "Delivery component")
+        /// that reject the plain `fields` path. Value is JSON-parsed if valid, else a string.
+        ///
+        /// ECCF single-select (value = numeric option id):
+        ///   --set customfield_59170=625
+        #[arg(long, value_name = "FIELD_ID=VALUE")]
+        set: Vec<String>,
         /// Skip required custom field prompts (fields will be omitted)
         #[arg(long)]
         no_custom_fields: bool,
@@ -759,6 +767,7 @@ pub async fn handle(
             sprint,
             attachments,
             field,
+            set,
             no_custom_fields,
             json,
         } => {
@@ -778,6 +787,7 @@ pub async fn handle(
                 sprint,
                 attachments,
                 field,
+                set,
                 no_custom_fields,
                 json,
             )
@@ -996,7 +1006,8 @@ async fn view_issue(
     }
 
     if download || download_all {
-        let dir = download_dir.unwrap_or_else(|| std::path::PathBuf::from(format!("{key}-attachments")));
+        let dir =
+            download_dir.unwrap_or_else(|| std::path::PathBuf::from(format!("{key}-attachments")));
         let opts = jira_core::DownloadOptions {
             images_only: !download_all,
             compress: !no_compress,
@@ -1050,6 +1061,7 @@ async fn create_issue(
     sprint: Option<String>,
     attachments: Vec<std::path::PathBuf>,
     field: Vec<String>,
+    set: Vec<String>,
     no_custom_fields: bool,
     json: bool,
 ) -> Result<()> {
@@ -1105,6 +1117,7 @@ async fn create_issue(
         parent,
         fix_versions: parse_csv(fix_version.as_deref()),
         custom_fields,
+        update_ops: parse_set_flags(&set)?,
     };
 
     let spinner = spinner_new("Creating issue...");
@@ -2651,6 +2664,11 @@ async fn batch_manifest(
                             .collect()
                     })
                     .unwrap_or_default();
+                let update_ops = entry
+                    .get("update")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
 
                 let req = CreateIssueRequestV2 {
                     project_key: project,
@@ -2665,6 +2683,7 @@ async fn batch_manifest(
                     fix_versions,
                     parent,
                     custom_fields,
+                    update_ops,
                 };
                 match client.create_issue_v2(req).await {
                     Ok(issue) => {
@@ -2886,6 +2905,7 @@ async fn clone_issue(
         fix_versions,
         parent: None,
         custom_fields: HashMap::new(),
+        update_ops: serde_json::Map::new(),
     };
 
     let spinner = spinner_new("Cloning issue...");
@@ -3027,6 +3047,12 @@ async fn bulk_create(client: JiraClient, manifest: std::path::PathBuf, json: boo
                     .collect()
             })
             .unwrap_or_default();
+        // Verbatim `update` operations (e.g. ECCF single-select set-by-option-id)
+        let update_ops = entry
+            .get("update")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
 
         pb.set_message(summary.clone());
 
@@ -3043,6 +3069,7 @@ async fn bulk_create(client: JiraClient, manifest: std::path::PathBuf, json: boo
             parent,
             fix_versions,
             custom_fields,
+            update_ops,
         };
 
         match client.create_issue_v2(req).await {
@@ -3102,6 +3129,32 @@ fn parse_field_flags(fields: &[String]) -> Result<HashMap<String, FieldValue>> {
             FieldValue::Text(value.to_string())
         };
         result.insert(key.to_string(), field_value);
+    }
+    Ok(result)
+}
+
+/// Parse `--set key=value` flags into a Jira `update` object:
+/// `{"<key>": [{"set": <value>}]}`. Needed for plugin field types (e.g. ECCF single-select)
+/// that only accept a `set` operation and reject the plain `fields` path.
+///
+/// A value is kept as a **string** operand unless it is an explicit JSON object or array —
+/// the ECCF handler wants a string (an option id like `"625"`), and treating a bare `625`
+/// as a JSON number would change the operand type. Structured operands
+/// (`{"value":"A"}`, `[...]`) are passed through for field types that need them.
+fn parse_set_flags(sets: &[String]) -> Result<serde_json::Map<String, Value>> {
+    let mut result = serde_json::Map::new();
+    for kv in sets {
+        let (key, value) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid --set format '{}': expected key=value", kv))?;
+        let trimmed = value.trim_start();
+        let op_value = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            serde_json::from_str::<Value>(value)
+                .unwrap_or_else(|_| Value::String(value.to_string()))
+        } else {
+            Value::String(value.to_string())
+        };
+        result.insert(key.to_string(), serde_json::json!([{ "set": op_value }]));
     }
     Ok(result)
 }
@@ -3194,6 +3247,45 @@ mod tests {
                 assert_eq!(resolution.as_deref(), Some("Done"));
             }
             _ => panic!("expected Transition variant"),
+        }
+    }
+
+    #[test]
+    fn parse_set_flags_builds_set_operation() {
+        // ECCF single-select: numeric option id sent via an `update` set operation.
+        let ops = parse_set_flags(&["customfield_59170=625".to_string()]).unwrap();
+        assert_eq!(
+            ops.get("customfield_59170"),
+            Some(&serde_json::json!([{ "set": "625" }])),
+            "non-JSON value must be kept as a string operand"
+        );
+    }
+
+    #[test]
+    fn parse_set_flags_passes_json_operand_through() {
+        let ops = parse_set_flags(&["customfield_10020={\"value\":\"A\"}".to_string()]).unwrap();
+        assert_eq!(
+            ops.get("customfield_10020"),
+            Some(&serde_json::json!([{ "set": { "value": "A" } }])),
+        );
+    }
+
+    #[test]
+    fn create_parses_repeatable_set_flag() {
+        let cli = TestCli::parse_from([
+            "create",
+            "-p",
+            "PAYDAY",
+            "-s",
+            "Sub",
+            "--set",
+            "customfield_59170=625",
+        ]);
+        match cli.cmd {
+            IssueCommand::Create { set, .. } => {
+                assert_eq!(set, vec!["customfield_59170=625".to_string()]);
+            }
+            _ => panic!("expected Create variant"),
         }
     }
 

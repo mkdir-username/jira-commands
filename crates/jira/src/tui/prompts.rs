@@ -108,6 +108,7 @@ pub(super) async fn tui_create_issue(
         parent: None,
         fix_versions: Vec::new(),
         custom_fields: std::collections::HashMap::new(),
+        update_ops: serde_json::Map::new(),
     };
 
     let issue = client.create_issue_v2(req).await?;

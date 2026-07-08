@@ -59,6 +59,10 @@ pub struct CreateIssueRequestV2 {
     pub fix_versions: Vec<String>,
     /// Custom field ID → typed value
     pub custom_fields: HashMap<String, FieldValue>,
+    /// Verbatim `update` operations, e.g. `{"customfield_59170": [{"set": "625"}]}`.
+    /// Some plugin field types (ECCF single-select) only accept a `set` operation
+    /// and reject the plain `fields` path.
+    pub update_ops: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
