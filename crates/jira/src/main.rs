@@ -58,6 +58,12 @@ enum Commands {
         #[command(subcommand)]
         command: cli::plan::PlanCommand,
     },
+
+    /// Alfa ECCF (Extended Context Custom Fields) — discover select option ids
+    Eccf {
+        #[command(subcommand)]
+        command: cli::eccf::EccfCommand,
+    },
 }
 
 #[tokio::main]
@@ -112,6 +118,10 @@ async fn main() -> Result<()> {
         Commands::Plan { command } => {
             let client = build_client().context("Failed to initialize Jira client")?;
             cli::plan::handle(command, client).await?;
+        }
+        Commands::Eccf { command } => {
+            let client = build_client().context("Failed to initialize Jira client")?;
+            cli::eccf::handle(command, client).await?;
         }
     }
 

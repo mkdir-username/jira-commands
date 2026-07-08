@@ -1389,6 +1389,57 @@ impl JiraClient {
 
         Ok(resp.values)
     }
+
+    /// Resolve a project key (e.g. `PAYDAY`) to its numeric id (e.g. `91001`).
+    pub async fn get_project_id(&self, project_key: &str) -> Result<String> {
+        let headers = self.auth_headers()?;
+        let url = self.platform_url(&format!("/project/{project_key}"));
+
+        let http = &self.http;
+        let project: Value = self
+            .request(|| http.get(&url).headers(headers.clone()))
+            .await?;
+
+        project
+            .get("id")
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+            })
+            .ok_or_else(|| JiraError::NotFound(format!("project {project_key} has no id")))
+    }
+
+    /// Fetch selectable options for an ECCF (Extended Context Custom Field) select
+    /// field, scoped by project and issue type. Returns each option's numeric id —
+    /// the value ECCF fields expect via an `update` set operation.
+    pub async fn eccf_select_options(
+        &self,
+        field_id: &str,
+        project_id: &str,
+        issue_type_id: &str,
+    ) -> Result<Vec<EccfOption>> {
+        let headers = self.auth_headers()?;
+        let url = format!(
+            "{}/rest/eccf/1.0/context/select/options",
+            self.config.base_url.trim_end_matches('/')
+        );
+        // Context param types are Gson `@SerializedName` numbers: PROJECT="1", ISSUE_TYPE="2".
+        let params = format!(
+            r#"[{{"type":"1","valueIds":[{project_id}]}},{{"type":"2","valueIds":[{issue_type_id}]}}]"#
+        );
+
+        let http = &self.http;
+        let options: Vec<EccfOption> = self
+            .request(|| {
+                http.get(&url)
+                    .headers(headers.clone())
+                    .query(&[("fieldId", field_id), ("params", params.as_str())])
+            })
+            .await?;
+
+        Ok(options)
+    }
 }
 
 /// Issue type metadata (id + name) returned by createmeta.
@@ -1396,6 +1447,17 @@ impl JiraClient {
 pub struct IssueType {
     pub id: String,
     pub name: String,
+}
+
+/// A single selectable option of an ECCF select field.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct EccfOption {
+    pub id: i64,
+    pub title: String,
+    #[serde(default, rename = "isDisabled")]
+    pub is_disabled: bool,
+    #[serde(default, rename = "isRequired")]
+    pub is_required: bool,
 }
 
 async fn handle_response<T>(response: Response) -> Result<T>
@@ -1876,6 +1938,28 @@ mod tests {
         assert_eq!(fields[0].id, "customfield_59170");
         assert_eq!(fields[0].name, "Delivery component");
         assert!(fields[0].required);
+    }
+
+    #[tokio::test]
+    async fn eccf_select_options_parses_option_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/eccf/1.0/context/select/options"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": 625, "title": "JS", "isDisabled": false, "isRequired": false }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+        let opts = client
+            .eccf_select_options("59170", "91001", "10300")
+            .await
+            .expect("eccf options should parse");
+
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].id, 625);
+        assert_eq!(opts[0].title, "JS");
     }
 
     #[tokio::test]
