@@ -141,6 +141,26 @@ plugin/
 
 ---
 
+## ECCF custom fields (Alfa DC)
+
+Alfa's "Extended Context Custom Fields" plugin (`ru.alfabank.atlassian.jira.eccf`) owns required fields like Delivery component (`customfield_59170`, `eccf-single-select-type`). Its handler does `getOption(Integer.parseInt(optionId))` — so `fields:{cf:"JS"}` → 500 and `fields:{cf:{"value":...}}` → 400 "Operation value must be a string". **Write only via `update.set` with the numeric option-id as a string, never the `fields` path:**
+
+```bash
+jirac issue create ... --set customfield_59170=625      # 625 = option-id, not "JS"
+```
+
+Emits `{"update":{"customfield_59170":[{"set":"625"}]}}`. Multi-select → `[{"set":["id1","id2"]}]`. In bulk/batch manifests use the `"update"` key. `--set` → `parse_set_flags` (`cli/issue.rs`) → `create_issue_v2` (`jira-core/client.rs`).
+
+Resolve a display value → option-id via the plugin (type codes are Gson `@SerializedName` numbers — PROJECT=`"1"`, ISSUE_TYPE=`"2"`, **not names**):
+
+```
+GET /rest/eccf/1.0/context/select/options?fieldId=<num>&params=<urlenc [{"type":"1","valueIds":[projectId]},{"type":"2","valueIds":[issueTypeId]}]>
+```
+
+Source reverse-engineered from Bitbucket repo **`JIRA/extended-context-custom-fields`** (found via `/bb-search`). Full API map + live IDs: project memory `eccf-fields.md`.
+
+---
+
 ## Smoke test
 
 Claude runs this before reporting to repo owner. Fix until all green.
