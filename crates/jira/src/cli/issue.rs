@@ -156,6 +156,9 @@ pub enum IssueCommand {
         ///
         /// ECCF single-select (value = numeric option id):
         ///   --set customfield_59170=625
+        /// ECCF multi-select (value = JSON array of option ids):
+        ///   --set customfield_12345='["101","102"]'
+        /// Discover option ids with: jirac eccf options --field <id> -p <PROJ> -t <TYPE>
         #[arg(long, value_name = "FIELD_ID=VALUE")]
         set: Vec<String>,
         /// Skip required custom field prompts (fields will be omitted)
