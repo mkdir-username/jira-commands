@@ -262,7 +262,7 @@ impl JiraApp {
                 parent: args.parent,
                 fix_versions: args.fix_versions.unwrap_or_default(),
                 custom_fields: map_custom_fields(args.custom_fields),
-                update_ops: serde_json::Map::new(),
+                update_ops: map_update_ops(args.set),
             })
             .await?;
 
@@ -625,6 +625,18 @@ fn map_custom_fields(
         .unwrap_or_default()
         .into_iter()
         .map(|(key, value)| (key, FieldValue::Raw(value)))
+        .collect()
+}
+
+// ECCF and other plugin fields reject the plain `fields` path — they only accept
+// an `update` set operation with a numeric option-id. Wrap each `field → value`
+// into `{field: [{"set": value}]}`.
+fn map_update_ops(
+    set: Option<std::collections::BTreeMap<String, Value>>,
+) -> serde_json::Map<String, Value> {
+    set.unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| (key, serde_json::json!([{ "set": value }])))
         .collect()
 }
 
@@ -1003,5 +1015,22 @@ mod tests {
         .expect_err("duplicate query should fail");
 
         assert_eq!(err.to_mcp().message, "validation_error");
+    }
+
+    #[test]
+    fn map_update_ops_wraps_each_value_in_set_operation() {
+        let input = [("customfield_59170".to_string(), Value::String("625".into()))]
+            .into_iter()
+            .collect();
+        let ops = map_update_ops(Some(input));
+        assert_eq!(
+            ops.get("customfield_59170"),
+            Some(&serde_json::json!([{ "set": "625" }]))
+        );
+    }
+
+    #[test]
+    fn map_update_ops_none_is_empty() {
+        assert!(map_update_ops(None).is_empty());
     }
 }

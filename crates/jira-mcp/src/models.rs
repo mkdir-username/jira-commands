@@ -91,6 +91,9 @@ pub struct IssueCreateArgs {
     pub parent: Option<String>,
     pub fix_versions: Option<Vec<String>>,
     pub custom_fields: Option<BTreeMap<String, Value>>,
+    /// Plugin fields (ECCF single/multi-select) that only accept an `update` set
+    /// operation with a numeric option-id, e.g. `{"customfield_59170": "625"}`.
+    pub set: Option<BTreeMap<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
