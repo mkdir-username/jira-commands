@@ -620,7 +620,10 @@ impl JiraClient {
 
         #[derive(serde::Deserialize)]
         struct IssueTypeMeta {
-            #[serde(rename = "issueTypes")]
+            // Cloud returns `{issueTypes: [{fields: ...}]}`; DC returns a paginated
+            // `{values: [...]}` whose entries carry no per-type `fields` — DC callers
+            // must fetch fields per issue type via `get_fields_for_issue_type`.
+            #[serde(rename = "issueTypes", alias = "values")]
             issue_types: Vec<IssueTypeDetail>,
         }
 
@@ -748,7 +751,8 @@ impl JiraClient {
 
         #[derive(serde::Deserialize)]
         struct MetaResponse {
-            #[serde(rename = "issueTypes")]
+            // Cloud returns `{issueTypes: [...]}`; DC returns a paginated `{values: [...]}`.
+            #[serde(rename = "issueTypes", alias = "values")]
             issue_types: Vec<IssueType>,
         }
 
@@ -773,6 +777,8 @@ impl JiraClient {
 
         #[derive(serde::Deserialize)]
         struct FieldMetaResponse {
+            // Cloud returns `{fields: ...}`; DC returns a paginated `{values: [...]}`.
+            #[serde(rename = "fields", alias = "values")]
             fields: FieldCollection,
         }
 
@@ -1805,6 +1811,71 @@ mod tests {
         assert_eq!(fields[0].name, "Labels (OSS)");
         assert!(fields[0].required);
         assert_eq!(fields[0].field_type, "array");
+    }
+
+    #[tokio::test]
+    async fn get_issue_types_supports_dc_values_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/issue/createmeta/PAYDAY/issuetypes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "isLast": true,
+                "maxResults": 50,
+                "startAt": 0,
+                "total": 1,
+                "values": [
+                    { "id": "10300", "name": "Development", "subtask": true }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+        let types = client
+            .get_issue_types("PAYDAY")
+            .await
+            .expect("DC paginated values response should parse");
+
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].id, "10300");
+        assert_eq!(types[0].name, "Development");
+    }
+
+    #[tokio::test]
+    async fn get_fields_for_issue_type_supports_dc_values_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/issue/createmeta/PAYDAY/issuetypes/10300"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "isLast": true,
+                "maxResults": 50,
+                "startAt": 0,
+                "total": 1,
+                "values": [
+                    {
+                        "fieldId": "customfield_59170",
+                        "name": "Delivery component",
+                        "required": true,
+                        "schema": {
+                            "type": "option",
+                            "custom": "ru.alfabank.atlassian.jira.eccf:eccf-single-select-type"
+                        }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+        let fields = client
+            .get_fields_for_issue_type("PAYDAY", "10300")
+            .await
+            .expect("DC paginated values response should parse");
+
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].id, "customfield_59170");
+        assert_eq!(fields[0].name, "Delivery component");
+        assert!(fields[0].required);
     }
 
     #[tokio::test]
