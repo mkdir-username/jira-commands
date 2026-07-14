@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 
 use crate::{
     adf::markdown_to_adf,
-    config::{JiraAuthType, JiraConfig},
+    config::{JiraAuthType, JiraConfig, JiraDeployment},
     error::{JiraError, Result},
     model::{
         attachment::Attachment,
@@ -163,55 +163,69 @@ impl JiraClient {
         Ok(headers)
     }
 
-    /// Get the current authenticated user's accountId.
+    /// Field identifying a user in request bodies: `accountId` on Cloud, `name` on Data Center.
+    fn user_ref_field(&self) -> &'static str {
+        match self.config.deployment {
+            JiraDeployment::DataCenter => "name",
+            JiraDeployment::Cloud => "accountId",
+        }
+    }
+
+    /// Get the current authenticated user's identifier (accountId on Cloud, name on DC).
     pub async fn get_myself(&self) -> Result<String> {
         let headers = self.auth_headers()?;
         let url = self.platform_url("/myself");
+        let field = self.user_ref_field();
 
         let http = &self.http;
         let user: serde_json::Value = self
             .request(|| http.get(&url).headers(headers.clone()))
             .await?;
 
-        user.get("accountId")
+        user.get(field)
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| JiraError::Api {
                 status: 0,
-                message: "Could not get accountId from /myself".into(),
+                message: format!("Could not get {field} from /myself"),
             })
     }
 
-    /// Resolve an assignee string to a Jira accountId.
+    /// Resolve an assignee string to the user object Jira expects in `fields.assignee`.
     ///
-    /// - `"me"` → current user's accountId via /myself
-    /// - contains `@` → search by email, return first match's accountId
-    /// - anything else → treated as a raw accountId and returned as-is
-    async fn resolve_assignee_account_id(&self, s: &str) -> Result<String> {
-        if s == "me" {
-            return self.get_myself().await;
-        }
-        if !s.contains('@') {
-            return Ok(s.to_string());
-        }
-        // Resolve email → accountId via user search
-        let users = self.search_users(s).await?;
-        users
-            .iter()
-            .find(|u| {
-                u.get("emailAddress")
-                    .and_then(|v| v.as_str())
-                    .map(|e| e.eq_ignore_ascii_case(s))
-                    .unwrap_or(false)
-            })
-            .or_else(|| users.first())
-            .and_then(|u| u.get("accountId"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| JiraError::Api {
-                status: 0,
-                message: format!("User not found: {s}"),
-            })
+    /// - `"me"` → current user via /myself
+    /// - contains `@` → search by email, take the first match
+    /// - anything else → used verbatim (accountId on Cloud, login on Data Center)
+    ///
+    /// Cloud yields `{"accountId": "..."}`, Data Center `{"name": "..."}` — DC has no accountId.
+    async fn resolve_assignee_ref(&self, s: &str) -> Result<Value> {
+        let field = self.user_ref_field();
+
+        let id = if s == "me" {
+            self.get_myself().await?
+        } else if !s.contains('@') {
+            s.to_string()
+        } else {
+            let users = self.search_users(s).await?;
+            users
+                .iter()
+                .find(|u| {
+                    u.get("emailAddress")
+                        .and_then(|v| v.as_str())
+                        .map(|e| e.eq_ignore_ascii_case(s))
+                        .unwrap_or(false)
+                })
+                .or_else(|| users.first())
+                .and_then(|u| u.get(field))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| JiraError::Api {
+                    status: 0,
+                    message: format!("User not found: {s}"),
+                })?
+        };
+
+        Ok(json!({ field: id }))
     }
 
     /// Core request method with rate-limit retry logic.
@@ -528,8 +542,7 @@ impl JiraClient {
         }
 
         if let Some(assignee) = &req.assignee {
-            let account_id = self.resolve_assignee_account_id(assignee).await?;
-            fields["assignee"] = json!({ "accountId": account_id });
+            fields["assignee"] = self.resolve_assignee_ref(assignee).await?;
         }
 
         if let Some(priority) = &req.priority {
@@ -568,8 +581,7 @@ impl JiraClient {
             fields["description"] = markdown_to_adf(description);
         }
         if let Some(assignee) = &req.assignee {
-            let account_id = self.resolve_assignee_account_id(assignee).await?;
-            fields["assignee"] = json!({ "accountId": account_id });
+            fields["assignee"] = self.resolve_assignee_ref(assignee).await?;
         }
         if let Some(priority) = &req.priority {
             fields["priority"] = json!({ "name": priority });
@@ -866,16 +878,22 @@ impl JiraClient {
     }
 
     /// Search Jira users by query string (for User field autocomplete).
+    ///
+    /// Data Center's `/user/search` takes `username`; Cloud takes `query`.
     pub async fn search_users(&self, query: &str) -> Result<Vec<Value>> {
         let headers = self.auth_headers()?;
         let url = self.platform_url("/user/search");
+        let param = match self.config.deployment {
+            JiraDeployment::DataCenter => "username",
+            JiraDeployment::Cloud => "query",
+        };
 
         let http = &self.http;
         let users: Vec<Value> = self
             .request(|| {
                 http.get(&url)
                     .headers(headers.clone())
-                    .query(&[("query", query), ("maxResults", "20")])
+                    .query(&[(param, query), ("maxResults", "20")])
             })
             .await?;
 
@@ -990,8 +1008,7 @@ impl JiraClient {
             fields["description"] = adf;
         }
         if let Some(assignee) = &req.assignee {
-            let account_id = self.resolve_assignee_account_id(assignee).await?;
-            fields["assignee"] = json!({ "accountId": account_id });
+            fields["assignee"] = self.resolve_assignee_ref(assignee).await?;
         }
         if let Some(priority) = &req.priority {
             fields["priority"] = json!({ "name": priority });
@@ -1573,7 +1590,7 @@ mod tests {
     use super::*;
     use crate::config::{JiraAuthType, JiraDeployment};
     use wiremock::{
-        matchers::{body_json, header, method, path},
+        matchers::{body_json, header, method, path, query_param},
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -2010,5 +2027,174 @@ mod tests {
             .transition_issue("PAYDAY-1", "321")
             .await
             .expect("legacy transition should succeed");
+    }
+
+    fn cloud_test_client(base_url: String) -> JiraClient {
+        JiraClient::new(JiraConfig {
+            profile_name: Some("cloud-test".into()),
+            base_url,
+            email: "me@example.com".into(),
+            token: Some("cloud-token".into()),
+            project: None,
+            timeout_secs: 30,
+            deployment: JiraDeployment::Cloud,
+            auth_type: JiraAuthType::CloudApiToken,
+            api_version: 3,
+        })
+    }
+
+    async fn mock_created_issue(server: &MockServer, api_version: u8, key: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!("/rest/api/{api_version}/issue/{key}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "1",
+                "key": key,
+                "fields": {"summary": "s", "status": {"name": "Open"}}
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn dc_assignee_me_resolves_to_name_object() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/myself"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "U_M25ZM",
+                "key": "JIRAUSER155790",
+                "displayName": "Черба Денис Сергеевич"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/rest/api/2/issue"))
+            .and(body_json(json!({
+                "fields": {
+                    "project": {"key": "PAYDAY"},
+                    "summary": "sub",
+                    "issuetype": {"name": "Development"},
+                    "assignee": {"name": "U_M25ZM"},
+                    "parent": {"key": "PAYDAY-1831"}
+                },
+                "update": {"customfield_59170": [{"set": "625"}]}
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"key": "PAYDAY-1855"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        mock_created_issue(&server, 2, "PAYDAY-1855").await;
+
+        let mut update_ops = serde_json::Map::new();
+        update_ops.insert("customfield_59170".into(), json!([{"set": "625"}]));
+
+        let client = dc_test_client(server.uri());
+        let issue = client
+            .create_issue_v2(CreateIssueRequestV2 {
+                project_key: "PAYDAY".into(),
+                summary: "sub".into(),
+                issue_type: "Development".into(),
+                assignee: Some("me".into()),
+                parent: Some("PAYDAY-1831".into()),
+                update_ops,
+                ..Default::default()
+            })
+            .await
+            .expect("DC create with assignee=me should succeed");
+
+        assert_eq!(issue.key, "PAYDAY-1855");
+    }
+
+    #[tokio::test]
+    async fn cloud_assignee_me_keeps_account_id_object() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/myself"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"accountId": "5b10a2844c"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/issue"))
+            .and(body_json(json!({
+                "fields": {
+                    "project": {"key": "PROJ"},
+                    "summary": "task",
+                    "issuetype": {"name": "Task"},
+                    "assignee": {"accountId": "5b10a2844c"}
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"key": "PROJ-1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        mock_created_issue(&server, 3, "PROJ-1").await;
+
+        let client = cloud_test_client(server.uri());
+        let issue = client
+            .create_issue_v2(CreateIssueRequestV2 {
+                project_key: "PROJ".into(),
+                summary: "task".into(),
+                issue_type: "Task".into(),
+                assignee: Some("me".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("Cloud create with assignee=me should succeed");
+
+        assert_eq!(issue.key, "PROJ-1");
+    }
+
+    #[tokio::test]
+    async fn dc_assignee_email_searches_by_username_param() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/user/search"))
+            .and(query_param("username", "MSTsareva@alfabank.ru"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "name": "U_M26RC",
+                "key": "JIRAUSER158012",
+                "emailAddress": "MSTsareva@alfabank.ru"
+            }])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/rest/api/2/issue"))
+            .and(body_json(json!({
+                "fields": {
+                    "project": {"key": "PAYDAY"},
+                    "summary": "sub",
+                    "issuetype": {"name": "Development"},
+                    "assignee": {"name": "U_M26RC"}
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"key": "PAYDAY-1900"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        mock_created_issue(&server, 2, "PAYDAY-1900").await;
+
+        let client = dc_test_client(server.uri());
+        client
+            .create_issue_v2(CreateIssueRequestV2 {
+                project_key: "PAYDAY".into(),
+                summary: "sub".into(),
+                issue_type: "Development".into(),
+                assignee: Some("MSTsareva@alfabank.ru".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("DC create with email assignee should succeed");
     }
 }

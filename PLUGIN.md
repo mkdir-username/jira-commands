@@ -25,6 +25,7 @@ jirac auth login
 | `/jira:list-issues`     | List issues by project or JQL           |
 | `/jira:view-issue`      | View full issue detail                  |
 | `/jira:create-issue`    | Create a new issue                      |
+| `/jira:subtask`         | Create a sub-task under a parent issue  |
 | `/jira:update-issue`    | Update an existing issue                |
 | `/jira:transition`      | Transition an issue                     |
 | `/jira:comment`         | List comments or add a Markdown comment |

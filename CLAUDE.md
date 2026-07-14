@@ -157,7 +157,25 @@ Resolve a display value → option-id via the plugin (type codes are Gson `@Seri
 GET /rest/eccf/1.0/context/select/options?fieldId=<num>&params=<urlenc [{"type":"1","valueIds":[projectId]},{"type":"2","valueIds":[issueTypeId]}]>
 ```
 
+Resolve a display value → option-id without hand-rolling that request: `jirac eccf options --field 59170 -p PAYDAY -t Development`.
+
 Source reverse-engineered from Bitbucket repo **`JIRA/extended-context-custom-fields`** (found via `/bb-search`). Full API map + live IDs: project memory `eccf-fields.md`.
+
+### Sub-task recipe (PAYDAY)
+
+The sub-task issue type in PAYDAY is **`Development`**, not `Sub-task` — read an existing sub-task before assuming a type. Working command:
+
+```bash
+jirac issue create -p PAYDAY -t Development --parent PAYDAY-1831 \
+  -s '[Web Mobile] - 9.0 — Экран ошибки' \
+  --components Frontend --set customfield_59170=625 --assignee me --no-custom-fields
+```
+
+Jira can persist an issue and still answer 500 — after any error check `jirac issue list --jql 'parent = <KEY>'` before retrying, or the retry duplicates it in production.
+
+### Users are deployment-shaped
+
+DC has no `accountId` — `/rest/api/2/myself` returns `name` + `key`. `client.rs::user_ref_field` picks the field per deployment (`accountId` on Cloud, `name` on DC), `resolve_assignee_ref` returns the whole user object, and `search_users` sends `username=` on DC vs `query=` on Cloud. New code touching `fields.assignee` (or any user field) goes through `resolve_assignee_ref` — hardcoding `{"accountId": ...}` compiles fine and fails only against a live DC.
 
 ---
 
