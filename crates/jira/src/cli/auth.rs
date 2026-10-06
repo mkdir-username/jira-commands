@@ -352,7 +352,9 @@ async fn update(args: UpdateArgs) -> Result<()> {
         }
         if matches!(
             config.auth_type,
-            JiraAuthType::DataCenterPat | JiraAuthType::DataCenterBasic
+            JiraAuthType::DataCenterPat
+                | JiraAuthType::DataCenterBasic
+                | JiraAuthType::DataCenterCookie
         ) && matches!(config.deployment, JiraDeployment::Cloud)
         {
             config.auth_type = JiraAuthType::CloudApiToken;
@@ -488,7 +490,9 @@ fn prompt_auth_type(deployment: &JiraDeployment, default: JiraAuthType) -> Resul
 
     let selection = Select::new("Authentication mode:", options)
         .with_starting_cursor(match default {
-            JiraAuthType::CloudApiToken | JiraAuthType::DataCenterPat => 0,
+            JiraAuthType::CloudApiToken
+            | JiraAuthType::DataCenterPat
+            | JiraAuthType::DataCenterCookie => 0,
             JiraAuthType::DataCenterBasic => 1,
         })
         .prompt()?;
@@ -557,6 +561,7 @@ fn auth_type_label(value: &JiraAuthType) -> &'static str {
         JiraAuthType::CloudApiToken => "Cloud API token",
         JiraAuthType::DataCenterPat => "Data Center PAT",
         JiraAuthType::DataCenterBasic => "Data Center basic",
+        JiraAuthType::DataCenterCookie => "Data Center session cookie",
     }
 }
 

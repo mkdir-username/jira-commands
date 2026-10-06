@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::{
-    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, COOKIE},
     Client, Response, StatusCode,
 };
 use serde_json::{json, Value};
@@ -117,26 +117,8 @@ impl JiraClient {
     }
 
     fn auth_headers(&self) -> Result<HeaderMap> {
-        let token = self.config.token.as_deref().ok_or_else(|| {
-            JiraError::Auth("No token configured. Run `jirac auth login` first.".into())
-        })?;
-
-        let auth_value = match self.config.auth_type {
-            JiraAuthType::CloudApiToken | JiraAuthType::DataCenterBasic => {
-                let credentials = base64_encode(&format!("{}:{}", self.config.email, token));
-                format!("Basic {credentials}")
-            }
-            JiraAuthType::DataCenterPat => format!("Bearer {token}"),
-        };
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth_value)
-                .map_err(|e| JiraError::Auth(format!("Invalid auth header: {e}")))?,
-        );
+        let mut headers = self.auth_headers_no_content_type()?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
         Ok(headers)
     }
 
@@ -146,18 +128,22 @@ impl JiraClient {
             JiraError::Auth("No token configured. Run `jirac auth login` first.".into())
         })?;
 
-        let auth_value = match self.config.auth_type {
+        let mut headers = HeaderMap::new();
+        let (name, value) = match self.config.auth_type {
             JiraAuthType::CloudApiToken | JiraAuthType::DataCenterBasic => {
                 let credentials = base64_encode(&format!("{}:{}", self.config.email, token));
-                format!("Basic {credentials}")
+                (AUTHORIZATION, format!("Basic {credentials}"))
             }
-            JiraAuthType::DataCenterPat => format!("Bearer {token}"),
+            JiraAuthType::DataCenterPat => (AUTHORIZATION, format!("Bearer {token}")),
+            JiraAuthType::DataCenterCookie => {
+                // Jira DC rejects cookie-authenticated writes without the XSRF opt-out.
+                headers.insert("X-Atlassian-Token", HeaderValue::from_static("no-check"));
+                (COOKIE, token.to_string())
+            }
         };
-
-        let mut headers = HeaderMap::new();
         headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth_value)
+            name,
+            HeaderValue::from_str(&value)
                 .map_err(|e| JiraError::Auth(format!("Invalid auth header: {e}")))?,
         );
         Ok(headers)
@@ -1764,6 +1750,42 @@ mod tests {
 
         let info = client.get_server_info().await.expect("server info");
         assert_eq!(info["deploymentType"], Value::String("Data Center".into()));
+    }
+
+    #[tokio::test]
+    async fn data_center_cookie_sends_session_cookie_without_authorization() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/serverInfo"))
+            .and(header("cookie", "JSESSIONID=abc; atlassian.xsrf.token=xyz"))
+            .and(header("x-atlassian-token", "no-check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "deploymentType": "Data Center",
+                "version": "10.0.0"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = JiraClient::new(JiraConfig {
+            profile_name: None,
+            base_url: server.uri(),
+            email: String::new(),
+            token: Some("JSESSIONID=abc; atlassian.xsrf.token=xyz".into()),
+            project: None,
+            timeout_secs: 30,
+            deployment: JiraDeployment::DataCenter,
+            auth_type: JiraAuthType::DataCenterCookie,
+            api_version: 2,
+        });
+
+        let info = client.get_server_info().await.expect("server info");
+        assert_eq!(info["deploymentType"], Value::String("Data Center".into()));
+
+        let requests = server.received_requests().await.expect("recorded");
+        assert!(requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization")));
     }
 
     #[tokio::test]

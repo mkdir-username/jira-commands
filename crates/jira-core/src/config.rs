@@ -20,6 +20,7 @@ pub enum JiraAuthType {
     CloudApiToken,
     DataCenterPat,
     DataCenterBasic,
+    DataCenterCookie,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +193,7 @@ impl JiraConfig {
             JiraAuthType::CloudApiToken => "API token",
             JiraAuthType::DataCenterPat => "Personal access token",
             JiraAuthType::DataCenterBasic => "Password or personal access token",
+            JiraAuthType::DataCenterCookie => "Session cookie",
         }
     }
 
@@ -205,6 +207,7 @@ impl JiraConfig {
     pub fn auth_header_kind(&self) -> &'static str {
         match self.auth_type {
             JiraAuthType::DataCenterPat => "Bearer",
+            JiraAuthType::DataCenterCookie => "Cookie",
             JiraAuthType::CloudApiToken | JiraAuthType::DataCenterBasic => "Basic",
         }
     }
@@ -388,6 +391,8 @@ pub fn parse_auth_type(value: &str) -> Option<JiraAuthType> {
         "datacenter_basic" | "datacenter-basic" | "data_center_basic" | "dc-basic" | "basic" => {
             Some(JiraAuthType::DataCenterBasic)
         }
+        "datacenter_cookie" | "datacenter-cookie" | "data_center_cookie" | "dc-cookie"
+        | "cookie" => Some(JiraAuthType::DataCenterCookie),
         _ => None,
     }
 }
@@ -520,5 +525,31 @@ timeout_secs = 55
         assert_eq!(config.api_version, 2);
 
         clear_config_home();
+    }
+
+    #[test]
+    fn parses_cookie_auth_type_aliases() {
+        for alias in [
+            "cookie",
+            "dc-cookie",
+            "datacenter_cookie",
+            "DataCenter-Cookie",
+        ] {
+            assert_eq!(
+                parse_auth_type(alias),
+                Some(JiraAuthType::DataCenterCookie),
+                "alias {alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_auth_needs_no_user_identity() {
+        let config = JiraConfig {
+            auth_type: JiraAuthType::DataCenterCookie,
+            ..JiraConfig::default()
+        };
+        assert!(!config.requires_user_identity());
+        assert_eq!(config.auth_header_kind(), "Cookie");
     }
 }
