@@ -19,6 +19,7 @@ Active divergences from upstream (do NOT regress when editing core code):
 | `50e18b6`, `155cea9` | TUI/CLI column widths + `column_spacing(3)` + minimal default `visible_columns` | Reasonable defaults for narrow terminals — power users still expand via `C` keybind. |
 | `849356b`, `496159c` | Default JQL: `resolution = Unresolved ORDER BY issuetype ASC, updated DESC` | `jirac issue list` and TUI hide finished work by default; `jirac issue view <KEY>` still fetches any issue regardless of status. |
 | `95bb3d0`, `ae98b6b`, `216aea5` | `crates/jira/src/categorize.rs` (shared module) + grouping in CLI list and TUI | See "Domain grouping" below. |
+| `f886c8c` | `JiraAuthType::DataCenterCookie` (`JIRA_AUTH_TYPE=cookie`): `JIRA_TOKEN` is sent as `Cookie` + `X-Atlassian-Token: no-check`, no `Authorization` | Wrapper `~/.claude/scripts/jirac` falls back to the Chrome session cookie (`alfaintra-cookie get`) when `corp-token jira` is empty (Bitwarden locked). |
 
 **Single-purpose modules added by the fork:**
 - `crates/jira/src/categorize.rs` — `IssueCategory` enum + `categorize_issue(key, type)` used by both `cli/issue.rs::print_grouped_issues` and `tui/app.rs::set_issues`. **Both paths must call into this module — do not inline categorisation logic anywhere else.**
