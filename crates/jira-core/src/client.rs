@@ -510,6 +510,24 @@ impl JiraClient {
         Ok(raw.into_issue())
     }
 
+    /// Sub-task parent as Jira reports it now; `None` — parent отсутствует или не задан.
+    pub async fn get_parent_key(&self, key: &str) -> Result<Option<String>> {
+        let headers = self.auth_headers()?;
+        let url = self.platform_url(&format!("/issue/{key}?fields=parent"));
+
+        let http = &self.http;
+        let value: Value = self
+            .request(|| http.get(&url).headers(headers.clone()))
+            .await?;
+
+        Ok(value
+            .get("fields")
+            .and_then(|fields| fields.get("parent"))
+            .and_then(|parent| parent.get("key"))
+            .and_then(|key| key.as_str())
+            .map(str::to_owned))
+    }
+
     /// Create a new issue.
     pub async fn create_issue(&self, req: CreateIssueRequest) -> Result<Issue> {
         let headers = self.auth_headers()?;
@@ -598,7 +616,23 @@ impl JiraClient {
 
         let http = &self.http;
         self.request_no_body(|| http.put(&url).headers(headers.clone()).json(&body))
-            .await
+            .await?;
+
+        // Jira DC молча игнорирует parent, если поля нет на edit-экране: ответ 204, задача не тронута.
+        if let Some(parent) = &req.parent {
+            let actual = self.get_parent_key(key).await?;
+            if actual.as_deref() != Some(parent.as_str()) {
+                return Err(JiraError::Api {
+                    status: 400,
+                    message: format!(
+                        "parent не изменился: Jira DC игнорирует поле parent в правке, сейчас parent={}. Родителя меняет только мастер Move: /secure/MoveSubTaskParent!default.jspa?id=<id>",
+                        actual.as_deref().unwrap_or("нет")
+                    ),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Delete an issue.
@@ -2218,5 +2252,69 @@ mod tests {
             })
             .await
             .expect("DC create with email assignee should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_issue_reports_parent_that_jira_ignored() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/rest/api/2/issue/PAYDAY-2377"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/issue/PAYDAY-2377"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "1",
+                "key": "PAYDAY-2377",
+                "fields": { "parent": { "key": "PAYDAY-2349" } }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+        let err = client
+            .update_issue(
+                "PAYDAY-2377",
+                UpdateIssueRequest {
+                    parent: Some("PAYDAY-2378".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("MoveSubTaskParent"));
+    }
+
+    #[tokio::test]
+    async fn update_issue_accepts_applied_parent() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/rest/api/2/issue/PAYDAY-2377"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/issue/PAYDAY-2377"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "1",
+                "key": "PAYDAY-2377",
+                "fields": { "parent": { "key": "PAYDAY-2378" } }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = dc_test_client(server.uri());
+        client
+            .update_issue(
+                "PAYDAY-2377",
+                UpdateIssueRequest {
+                    parent: Some("PAYDAY-2378".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("applied parent must not raise");
     }
 }
