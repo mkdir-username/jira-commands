@@ -619,7 +619,21 @@ impl JiraClient {
             .await?;
 
         // Jira DC молча игнорирует parent, если поля нет на edit-экране: ответ 204, задача не тронута.
-        if let Some(parent) = &req.parent {
+        // `--field parent=…` уходит через custom_fields — проверяем и его.
+        let requested_parent = req.parent.clone().or_else(|| {
+            req.custom_fields.get("parent").and_then(|value| {
+                let json = value.to_api_json();
+                match json {
+                    Value::Object(map) => map
+                        .get("key")
+                        .and_then(|key| key.as_str())
+                        .map(str::to_owned),
+                    Value::String(key) => Some(key),
+                    _ => None,
+                }
+            })
+        });
+        if let Some(parent) = &requested_parent {
             let actual = self.get_parent_key(key).await?;
             if actual.as_deref() != Some(parent.as_str()) {
                 return Err(JiraError::Api {
@@ -2316,5 +2330,44 @@ mod tests {
             )
             .await
             .expect("applied parent must not raise");
+    }
+
+    #[tokio::test]
+    async fn update_issue_reports_parent_sent_as_custom_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/rest/api/2/issue/PAYDAY-2377"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/issue/PAYDAY-2377"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "1",
+                "key": "PAYDAY-2377",
+                "fields": { "parent": { "key": "PAYDAY-2349" } }
+            })))
+            .mount(&server)
+            .await;
+
+        let mut custom_fields = std::collections::HashMap::new();
+        custom_fields.insert(
+            "parent".to_string(),
+            crate::model::field::FieldValue::Raw(json!({ "key": "PAYDAY-2378" })),
+        );
+
+        let client = dc_test_client(server.uri());
+        let err = client
+            .update_issue(
+                "PAYDAY-2377",
+                UpdateIssueRequest {
+                    custom_fields,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("MoveSubTaskParent"));
     }
 }
